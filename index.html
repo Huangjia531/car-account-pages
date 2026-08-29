@@ -355,6 +355,20 @@ function setSyncStatus(state) {
     }
 }
 
+// 确保数据仓库（私有）存在，不存在则自动创建
+function ensureDataRepo() {
+    return ghFetch('/repos/' + syncCfg.owner + '/' + syncCfg.repo).then(r => {
+        if(r.ok) return true;
+        if(r.status === 404) {
+            return ghFetch('/user/repos', {method:'POST', body: JSON.stringify({name: syncCfg.repo, private: true, auto_init: true})}).then(rr => {
+                if(rr.ok || rr.status === 201 || rr.status === 409) return true; // 409=已存在
+                throw new Error('创建数据仓库失败：' + rr.status);
+            });
+        }
+        throw new Error('数据仓库 ' + r.status);
+    });
+}
+
 // 确保 data 分支存在（用于存放数据，不被 GitHub Pages 公开）
 function ensureDataBranch() {
     return ghFetch('/repos/' + syncCfg.owner + '/' + syncCfg.repo + '/git/refs/heads/' + SYNC_BRANCH).then(r => {
@@ -389,7 +403,8 @@ function ghGetSha() {
 function pushToCloud() {
     if(!syncReady()) return Promise.resolve(false);
     setSyncStatus('syncing');
-    return ensureDataBranch()
+    return ensureDataRepo()
+        .then(() => ensureDataBranch())
         .then(() => ghGetSha())
         .then(sha => {
             const body = {message: 'sync ' + new Date().toISOString(), content: b64encode(JSON.stringify(appData)), branch: SYNC_BRANCH};
@@ -467,7 +482,7 @@ function pullFromCloud(force) {
 // 配置弹窗保存后，校验令牌、获取用户名并拉取一次
 function applySyncConfig() {
     const token = (document.getElementById('syncToken').value || '').trim();
-    const repo = ((document.getElementById('syncRepo') ? document.getElementById('syncRepo').value : '') || '').trim() || 'car-account-pages';
+    const repo = ((document.getElementById('syncRepo') ? document.getElementById('syncRepo').value : '') || '').trim() || 'car-account-data';
     if(!token) { showToast('请填写 GitHub 私人令牌'); return; }
     setSyncStatus('syncing');
     ghFetch('/user', {headers: {'Authorization':'token ' + token, 'Accept':'application/vnd.github+json'}}).then(r => {
@@ -478,7 +493,7 @@ function applySyncConfig() {
         saveSyncCfg({token, owner: user.login, repo: repo});
         closeModal('syncModal');
         showToast('正在连接 GitHub 并拉取最新数据…');
-        return pullFromCloud();
+        return ensureDataRepo().then(() => pullFromCloud());
     }).then(adopted => finishConnect(adopted))
     .catch(err => {
         lastSyncError = (err && err.message) ? err.message : '连接失败';
@@ -6013,15 +6028,15 @@ try {
                 <input id="syncToken" class="table-input w-full text-left" placeholder="ghp_ 开头的 Personal Access Token（勾选 repo 权限，只显示一次）">
             </div>
             <div>
-                <label class="block text-xs font-medium text-gray-600 mb-1">仓库名</label>
-                <input id="syncRepo" class="table-input w-full text-left" value="car-account-pages" placeholder="car-account-pages">
+                <label class="block text-xs font-medium text-gray-600 mb-1">数据仓库名（与上面的网站代码仓库分开，自动建为私有）</label>
+                <input id="syncRepo" class="table-input w-full text-left" value="car-account-data" placeholder="car-account-data">
             </div>
             <div class="flex justify-end -mt-1">
                 <button id="syncTestBtn" onclick="testConnection()" class="text-xs px-3 py-1.5 border border-blue-300 text-blue-600 rounded-lg hover:bg-blue-50 transition">测试连接</button>
             </div>
             <div class="bg-blue-50 border border-blue-100 rounded-lg p-3 text-xs text-blue-700 leading-relaxed">
                 <b>怎么拿令牌？</b> 打开 <span class="font-mono">github.com</span> 登录 → 右上角头像 <b>Settings → Developer settings → Personal access tokens → Tokens (classic) → Generate new token</b>，权限勾选 <b>repo</b>，复制生成的 <b>ghp_...</b> 填到上面。<br>
-                保存后系统会<b>自动在你的私有仓库建立 data 分支</b>并写入数据（Pages 用的是 main 分支，数据文件不会被公开）。数据仅你本人可见。
+                保存后系统会<b>自动新建一个私有数据仓库（默认 car-account-data）并写入数据</b>。你的财务数据只在这个私有仓库里，<b>任何人无法通过公开网站看到</b>。数据在你本机与这个私有仓库之间同步。
             </div>
         </div>
         <div class="flex gap-2 mt-5">
