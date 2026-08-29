@@ -494,10 +494,11 @@ function applySyncConfig() {
         saveSyncCfg({token, owner: user.login, repo: repo});
         closeModal('syncModal');
         showToast('正在连接 GitHub 并拉取最新数据…');
-        return ensureDataRepo().then(() => pullFromCloud());
+        return ensureDataRepo().then(() => pullFromCloud(isReadOnlyMode));
     }).then(adopted => {
-        if(!adopted) {
+        if(!adopted && !isReadOnlyMode) {
             // 云端尚无数据：把当前本地数据推送到私有仓库，使链接版/其他设备能拉取
+            // 只读（链接）模式禁止推送，避免用空数据覆盖桌面端真实数据
             showToast('云端暂无数据，正在把本地数据备份到 GitHub…');
             return pushToCloud().then(pushed => {
                 if(!pushed) throw new Error('备份本地数据到 GitHub 失败：' + (lastSyncError || '未知错误'));
@@ -519,6 +520,7 @@ function finishConnect(adopted, pushedLocal) {
     navigateTo('dashboard');
     if(adopted) showToast('已连接到 GitHub，数据已是最新');
     else if(pushedLocal) showToast('已连接 GitHub，本地数据已备份到云端');
+    else if(isReadOnlyMode) showToast('云端暂无数据：请先在桌面端保存一次，把数据备份到云端后再打开本链接');
     else showToast('已连接 GitHub，云端暂无数据，将使用本地数据');
 }
 // 用弹窗当前填写的令牌测试 GitHub 连通性（不保存配置）
