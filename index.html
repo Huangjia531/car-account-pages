@@ -300,6 +300,8 @@ let screenshotMode = false;
 let syncCfg = null;
 let lastSyncError = null;
 let lastSyncAt = null;
+let pushInProgress = false;
+let pendingPush = false;
 
 function loadSyncCfg() {
     try {
@@ -399,30 +401,50 @@ function ghGetSha() {
     });
 }
 
-// 推送到 GitHub（异步、失败静默）
+// 推送到 GitHub（串行队列 + 409 自动重试）
 function pushToCloud() {
     if(!syncReady()) return Promise.resolve(false);
-    setSyncStatus('syncing');
-    return ensureDataRepo()
-        .then(() => ensureDataBranch())
-        .then(() => ghGetSha())
-        .then(sha => {
-            const body = {message: 'sync ' + new Date().toISOString(), content: b64encode(JSON.stringify(appData)), branch: SYNC_BRANCH};
-            if(sha) body.sha = sha;
-            return ghFetch('/repos/' + syncCfg.owner + '/' + syncCfg.repo + '/contents/' + SYNC_FILE, {method:'PUT', body: JSON.stringify(body)});
-        })
-        .then(r => {
-            if(!r.ok) throw new Error('推送失败：' + r.status);
-            setSyncStatus('online');
-            lastSyncError = null;
-            lastSyncAt = Date.now();
-            return true;
-        })
+    // 如果当前有 push 在进行，排队等它完成后再推一次最新数据
+    if(pushInProgress) {
+        pendingPush = true;
+        return pushInProgress.then(() => pushToCloud());
+    }
+    const doPush = (attempt) => {
+        setSyncStatus('syncing');
+        return ensureDataRepo()
+            .then(() => ensureDataBranch())
+            .then(() => ghGetSha())
+            .then(sha => {
+                const body = {message: 'sync ' + new Date().toISOString(), content: b64encode(JSON.stringify(appData)), branch: SYNC_BRANCH};
+                if(sha) body.sha = sha;
+                return ghFetch('/repos/' + syncCfg.owner + '/' + syncCfg.repo + '/contents/' + SYNC_FILE, {method:'PUT', body: JSON.stringify(body)});
+            })
+            .then(r => {
+                if(r.status === 409 && attempt < 2) {
+                    // 版本冲突：可能并发保存，等待后重新获取 sha 重试
+                    return new Promise(resolve => setTimeout(resolve, 400)).then(() => doPush(attempt + 1));
+                }
+                if(!r.ok) throw new Error('推送失败：' + r.status);
+                setSyncStatus('online');
+                lastSyncError = null;
+                lastSyncAt = Date.now();
+                return true;
+            });
+    };
+    pushInProgress = doPush(0)
         .catch(err => {
             lastSyncError = (err && err.message) ? err.message : '网络无法访问 GitHub';
             setSyncStatus('offline');
             return false;
+        })
+        .finally(() => {
+            pushInProgress = false;
+            if(pendingPush) {
+                pendingPush = false;
+                pushToCloud();
+            }
         });
+    return pushInProgress;
 }
 
 // 从 GitHub 拉取最新数据（云端更新则采用云端）
