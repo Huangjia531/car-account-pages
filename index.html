@@ -485,6 +485,7 @@ function applySyncConfig() {
     const repo = ((document.getElementById('syncRepo') ? document.getElementById('syncRepo').value : '') || '').trim() || 'car-account-data';
     if(!token) { showToast('请填写 GitHub 私人令牌'); return; }
     setSyncStatus('syncing');
+    let pushedLocal = false;
     ghFetch('/user', {headers: {'Authorization':'token ' + token, 'Accept':'application/vnd.github+json'}}).then(r => {
         if(r.status === 401) throw new Error('auth');
         if(!r.ok) throw new Error('user ' + r.status);
@@ -494,7 +495,18 @@ function applySyncConfig() {
         closeModal('syncModal');
         showToast('正在连接 GitHub 并拉取最新数据…');
         return ensureDataRepo().then(() => pullFromCloud());
-    }).then(adopted => finishConnect(adopted))
+    }).then(adopted => {
+        if(!adopted) {
+            // 云端尚无数据：把当前本地数据推送到私有仓库，使链接版/其他设备能拉取
+            showToast('云端暂无数据，正在把本地数据备份到 GitHub…');
+            return pushToCloud().then(pushed => {
+                if(!pushed) throw new Error('备份本地数据到 GitHub 失败：' + (lastSyncError || '未知错误'));
+                pushedLocal = true;
+                return false;
+            });
+        }
+        return adopted;
+    }).then(adopted => finishConnect(adopted, pushedLocal))
     .catch(err => {
         lastSyncError = (err && err.message) ? err.message : '连接失败';
         if(err && /auth/.test(err.message)) showToast('令牌无效，请检查是否复制完整（GitHub 私人令牌只显示一次）');
@@ -502,10 +514,11 @@ function applySyncConfig() {
         setSyncStatus('offline');
     });
 }
-function finishConnect(adopted) {
+function finishConnect(adopted, pushedLocal) {
     renderVehicleNav();
     navigateTo('dashboard');
     if(adopted) showToast('已连接到 GitHub，数据已是最新');
+    else if(pushedLocal) showToast('已连接 GitHub，本地数据已备份到云端');
     else showToast('已连接 GitHub，云端暂无数据，将使用本地数据');
 }
 // 用弹窗当前填写的令牌测试 GitHub 连通性（不保存配置）
