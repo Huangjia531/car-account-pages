@@ -447,6 +447,33 @@ function pushToCloud() {
     return pushInProgress;
 }
 
+// 采用云端数据到本地
+function adoptCloudData(data, force) {
+    if(data && data.months) {
+        const localTs = appData.savedAt || 0;
+        const cloudTs = data.savedAt || 0;
+        if(cloudTs >= localTs || force) {
+            appData = data;
+            (appData.customVehicles || []).forEach(cv => {
+                if(!PLATES.find(p => p.plate === cv.plate)) PLATES.push(cv);
+            });
+            localStorage.setItem('carAccountData_v5', JSON.stringify(appData));
+            setSyncStatus('online');
+            lastSyncError = null;
+            lastSyncAt = Date.now();
+            return true;
+        }
+        setSyncStatus('online');
+        lastSyncError = null;
+        lastSyncAt = Date.now();
+        return false;
+    }
+    setSyncStatus('online');
+    lastSyncError = null;
+    lastSyncAt = Date.now();
+    return false;
+}
+
 // 从 GitHub 拉取最新数据（云端更新则采用云端）
 // force=true 时（只读链接模式）无论本地时间戳如何都采用云端数据，确保链接始终展示最新
 function pullFromCloud(force) {
@@ -459,31 +486,33 @@ function pullFromCloud(force) {
         return r.json();
     }).then(j => {
         if(!j) return false;
-        try {
-            const data = JSON.parse(b64decode(j.content));
-            if(data && data.months) {
-                const localTs = appData.savedAt || 0;
-                const cloudTs = data.savedAt || 0;
-                if(cloudTs >= localTs || force) {
-                    appData = data;
-                    (appData.customVehicles || []).forEach(cv => {
-                        if(!PLATES.find(p => p.plate === cv.plate)) PLATES.push(cv);
-                    });
-                    localStorage.setItem('carAccountData_v5', JSON.stringify(appData));
-                    setSyncStatus('online');
-                    lastSyncError = null;
-                    lastSyncAt = Date.now();
-                    return true;
-                }
-                setSyncStatus('online');
-                lastSyncError = null;
-                lastSyncAt = Date.now();
+        // GitHub Contents API 对 >1MB 的文件会返回空 content，此时用 git blob API 读取完整内容
+        if(!j.content || !j.content.trim()) {
+            if(!j.sha) {
+                lastSyncError = '云端文件内容为空且无法获取文件标识';
+                setSyncStatus('offline');
                 return false;
             }
-            setSyncStatus('online');
-            lastSyncError = null;
-            lastSyncAt = Date.now();
-            return false;
+            return ghFetch('/repos/' + syncCfg.owner + '/' + syncCfg.repo + '/git/blobs/' + j.sha).then(br => {
+                if(!br.ok) throw new Error('GitHub 请求失败：' + br.status);
+                return br.json();
+            }).then(blob => {
+                if(!blob.content) {
+                    lastSyncError = '云端文件内容为空';
+                    setSyncStatus('offline');
+                    return false;
+                }
+                const data = JSON.parse(b64decode(blob.content));
+                return adoptCloudData(data, force);
+            }).catch(e => {
+                lastSyncError = '云端数据解析失败：' + (e && e.message ? e.message : '未知错误');
+                setSyncStatus('offline');
+                return false;
+            });
+        }
+        try {
+            const data = JSON.parse(b64decode(j.content));
+            return adoptCloudData(data, force);
         } catch(e) {
             lastSyncError = '云端数据解析失败：' + e.message;
             setSyncStatus('offline');
@@ -542,7 +571,10 @@ function finishConnect(adopted, pushedLocal) {
     navigateTo('dashboard');
     if(adopted) showToast('已连接到 GitHub，数据已是最新');
     else if(pushedLocal) showToast('已连接 GitHub，本地数据已备份到云端');
-    else if(isReadOnlyMode) showToast('云端暂无数据：请先在桌面端保存一次，把数据备份到云端后再打开本链接');
+    else if(isReadOnlyMode) {
+        if(lastSyncError && lastSyncError !== '网络无法访问 GitHub') showToast('链接版读取失败：' + lastSyncError + '（请检查桌面端同步状态）');
+        else showToast('云端暂无数据：请先在桌面端保存一次，把数据备份到云端后再打开本链接');
+    }
     else showToast('已连接 GitHub，云端暂无数据，将使用本地数据');
 }
 // 用弹窗当前填写的令牌测试 GitHub 连通性（不保存配置）
