@@ -202,7 +202,7 @@
                     <button onclick="openSyncModal()" id="syncBadge" class="hidden btn px-3 py-1.5 bg-white/15 backdrop-blur text-white border border-white/30 rounded-lg text-sm hover:bg-white/25 transition items-center gap-1.5" title="云端同步状态">
                         <span id="syncDot" class="sync-dot sync-offline"></span><span id="syncLabel">未配置</span>
                     </button>
-                    <button onclick="openSyncModal()" class="btn px-3 py-1.5 bg-white/15 backdrop-blur text-white border border-white/30 rounded-lg text-sm hover:bg-white/25 transition" title="配置云端同步（Gitee）">
+                    <button onclick="openSyncModal()" class="btn px-3 py-1.5 bg-white/15 backdrop-blur text-white border border-white/30 rounded-lg text-sm hover:bg-white/25 transition" title="配置云端同步（GitHub）">
                         <i class="fas fa-cloud mr-1"></i>同步设置
                     </button>
                     <button onclick="toggleScreenshotMode()" class="btn px-3 py-1.5 bg-white/15 backdrop-blur text-white border border-white/30 rounded-lg text-sm hover:bg-white/25 transition" title="截图视图：隐藏浮层/提示小字，可滚动后自由截图">
@@ -288,15 +288,14 @@ const PLATES = [
     {plate:'粤DD85209', model:'小鹏G6', owner:''}
 ];
 
-// ==================== 云端同步（Gitee 码云，国内免费、支持浏览器跨域） ====================
-// 配置存于 localStorage：carAccountSyncCfg = { provider:'gitee', token, owner, repo }
-// 配置后：每次保存自动推送到你的 Gitee 私有仓库 data.json；打开页面自动拉取最新数据。
-// 合伙人无需任何操作，打开链接即看到最新数据。
-// 注意：数据存于你自己的 Gitee 私有仓库，仅适合内部小团队使用，令牌不要外传。
-const CLOUD_SYNC_BASE = 'https://fa2c744dd08d433fa3d4839862d52d34.gz5.agentos-app.net';
-const GITEE_API = 'https://gitee.com/api/v5';
-const GITEE_REPO = 'car-account-sync';
-const GITEE_FILE = 'data.json';
+// ==================== 云端同步（GitHub，用户网络可访问） ====================
+// 配置存于 localStorage：carAccountSyncCfg = { provider:'github', token, owner, repo }
+// 配置后：每次保存自动推送到你的 GitHub 私有仓库（data 分支的 data.json）；打开页面自动拉取最新数据。
+// 数据存于你自己的 GitHub 私有仓库的 data 分支（Pages 用 main 分支，不会公开数据文件），仅你本人可见。
+const CLOUD_SYNC_BASE = 'https://huangjia531.github.io/car-account-pages/';
+const GITHUB_API = 'https://api.github.com';
+const SYNC_FILE = 'data.json';
+const SYNC_BRANCH = 'data';
 let screenshotMode = false;
 let syncCfg = null;
 let lastSyncError = null;
@@ -305,14 +304,14 @@ let lastSyncAt = null;
 function loadSyncCfg() {
     try {
         syncCfg = JSON.parse(localStorage.getItem('carAccountSyncCfg') || 'null');
-        if(syncCfg && syncCfg.provider !== 'gitee') syncCfg = null; // 旧 provider 配置作废
+        if(syncCfg && syncCfg.provider !== 'github') syncCfg = null; // 旧 provider 配置作废
     }
     catch(e) { syncCfg = null; }
     return syncCfg;
 }
 function saveSyncCfg(cfg) {
     syncCfg = (cfg && cfg.token && cfg.owner && cfg.repo)
-        ? {provider:'gitee', token: cfg.token.trim(), owner: cfg.owner.trim(), repo: cfg.repo.trim()}
+        ? {provider:'github', token: cfg.token.trim(), owner: cfg.owner.trim(), repo: cfg.repo.trim()}
         : null;
     localStorage.setItem('carAccountSyncCfg', JSON.stringify(syncCfg));
     if(syncReady()) { lastSyncError = null; lastSyncAt = null; }
@@ -320,14 +319,15 @@ function saveSyncCfg(cfg) {
 }
 function syncReady() { return !!(syncCfg && syncCfg.token && syncCfg.owner && syncCfg.repo); }
 
-function giteeUrlWithToken(path, token) {
-    return GITEE_API + path + (path.indexOf('?') >= 0 ? '&' : '?') + 'access_token=' + encodeURIComponent(token);
+function ghHeaders(extra) {
+    const h = {'Authorization':'token ' + (syncCfg ? syncCfg.token : ''), 'Accept':'application/vnd.github+json'};
+    if(extra) Object.assign(h, extra);
+    return h;
 }
-function giteeUrl(path) { return giteeUrlWithToken(path, syncCfg.token); }
-function giteeFetch(path, options) {
+function ghFetch(path, options) {
     options = options || {};
-    options.headers = Object.assign({'Content-Type':'application/json'}, options.headers || {});
-    return fetch(giteeUrl(path), options);
+    options.headers = ghHeaders(options.headers || {});
+    return fetch(GITHUB_API + path, options);
 }
 function b64encode(str) {
     const bytes = new TextEncoder().encode(str);
@@ -349,48 +349,52 @@ function setSyncStatus(state) {
     if(label) label.textContent = state === 'online' ? '已同步' : state === 'syncing' ? '同步中…' : (syncReady() ? '离线' : '未配置');
     const badge = document.getElementById('syncBadge');
     if(badge) {
-        let tip = state === 'online' ? '云端同步正常' : state === 'syncing' ? '正在同步…' : (syncReady() ? ('同步失败：' + (lastSyncError || '未知错误')) : '未配置 Gitee 同步');
+        let tip = state === 'online' ? '云端同步正常' : state === 'syncing' ? '正在同步…' : (syncReady() ? ('同步失败：' + (lastSyncError || '未知错误')) : '未配置 GitHub 同步');
         if(lastSyncAt) tip += '\n上次同步：' + new Date(lastSyncAt).toLocaleString();
         badge.title = tip;
     }
 }
 
-// 获取文件 sha（不存在返回 null）
-function giteeGetSha() {
-    return giteeFetch('/repos/' + syncCfg.owner + '/' + syncCfg.repo + '/contents/' + GITEE_FILE).then(r => {
+// 确保 data 分支存在（用于存放数据，不被 GitHub Pages 公开）
+function ensureDataBranch() {
+    return ghFetch('/repos/' + syncCfg.owner + '/' + syncCfg.repo + '/git/refs/heads/' + SYNC_BRANCH).then(r => {
+        if(r.ok) return true;
+        if(r.status === 404) {
+            return ghFetch('/repos/' + syncCfg.owner + '/' + syncCfg.repo).then(rr => rr.json()).then(info => {
+                const def = info.default_branch || 'main';
+                return ghFetch('/repos/' + syncCfg.owner + '/' + syncCfg.repo + '/git/refs/heads/' + def).then(rr => rr.json());
+            }).then(ref => {
+                const sha = ref && ref.object ? ref.object.sha : null;
+                if(!sha) throw new Error('无法获取默认分支 HEAD');
+                return ghFetch('/repos/' + syncCfg.owner + '/' + syncCfg.repo + '/git/refs', {method:'POST', body: JSON.stringify({ref:'refs/heads/' + SYNC_BRANCH, sha})});
+            }).then(rr => {
+                if(rr.ok || rr.status === 201 || rr.status === 422) return true;
+                throw new Error('创建 ' + SYNC_BRANCH + ' 分支失败：' + rr.status);
+            });
+        }
+        throw new Error('branch ' + r.status);
+    });
+}
+
+// 获取 data.json 的 sha（data 分支，不存在返回 null）
+function ghGetSha() {
+    return ghFetch('/repos/' + syncCfg.owner + '/' + syncCfg.repo + '/contents/' + SYNC_FILE + '?ref=' + SYNC_BRANCH).then(r => {
         if(r.status === 404) return null;
         if(!r.ok) throw new Error('sha ' + r.status);
         return r.json().then(j => j.sha || null);
     });
 }
 
-// 确保仓库存在（不存在则自动创建私有仓库）
-function giteeEnsureRepo() {
-    return giteeFetch('/repos/' + syncCfg.owner + '/' + syncCfg.repo).then(r => {
-        if(r.ok) return true;
-        if(r.status === 404) {
-            return giteeFetch('/user/repos', {method:'POST', body: JSON.stringify({name: syncCfg.repo, private: true, auto_init: true})})
-                .then(rr => {
-                    if(rr.ok || rr.status === 201) return true;
-                    if(rr.status === 409) return true; // 已存在（并发创建）
-                    throw new Error('create repo ' + rr.status);
-                });
-        }
-        throw new Error('repo ' + r.status);
-    });
-}
-
-// 推送到 Gitee（异步、失败静默）
+// 推送到 GitHub（异步、失败静默）
 function pushToCloud() {
     if(!syncReady()) return Promise.resolve(false);
     setSyncStatus('syncing');
-    return giteeEnsureRepo()
-        .then(() => giteeGetSha())
+    return ensureDataBranch()
+        .then(() => ghGetSha())
         .then(sha => {
-            const body = {content: b64encode(JSON.stringify(appData)), message: 'sync ' + new Date().toISOString()};
+            const body = {message: 'sync ' + new Date().toISOString(), content: b64encode(JSON.stringify(appData)), branch: SYNC_BRANCH};
             if(sha) body.sha = sha;
-            const method = sha ? 'PUT' : 'POST';
-            return giteeFetch('/repos/' + syncCfg.owner + '/' + syncCfg.repo + '/contents/' + GITEE_FILE, {method, body: JSON.stringify(body)});
+            return ghFetch('/repos/' + syncCfg.owner + '/' + syncCfg.repo + '/contents/' + SYNC_FILE, {method:'PUT', body: JSON.stringify(body)});
         })
         .then(r => {
             if(!r.ok) throw new Error('推送失败：' + r.status);
@@ -400,21 +404,21 @@ function pushToCloud() {
             return true;
         })
         .catch(err => {
-            lastSyncError = (err && err.message) ? err.message : '网络无法访问 Gitee';
+            lastSyncError = (err && err.message) ? err.message : '网络无法访问 GitHub';
             setSyncStatus('offline');
             return false;
         });
 }
 
-// 从 Gitee 拉取最新数据（云端更新则采用云端）
+// 从 GitHub 拉取最新数据（云端更新则采用云端）
 // force=true 时（只读链接模式）无论本地时间戳如何都采用云端数据，确保链接始终展示最新
 function pullFromCloud(force) {
     if(!syncReady()) return Promise.resolve(false);
     setSyncStatus('syncing');
-    return giteeFetch('/repos/' + syncCfg.owner + '/' + syncCfg.repo + '/contents/' + GITEE_FILE).then(r => {
+    return ghFetch('/repos/' + syncCfg.owner + '/' + syncCfg.repo + '/contents/' + SYNC_FILE + '?ref=' + SYNC_BRANCH).then(r => {
         if(r.status === 404) { setSyncStatus('online'); lastSyncError = null; lastSyncAt = Date.now(); return false; } // 文件不存在，用本地
         if(r.status === 401 || r.status === 403) throw new Error('令牌无效或没有仓库访问权限：' + r.status);
-        if(!r.ok) throw new Error('Gitee 请求失败：' + r.status);
+        if(!r.ok) throw new Error('GitHub 请求失败：' + r.status);
         return r.json();
     }).then(j => {
         if(!j) return false;
@@ -452,7 +456,7 @@ function pullFromCloud(force) {
         if(err && /auth/.test(err.message)) {
             lastSyncError = err.message;
         } else {
-            lastSyncError = (err && err.message) ? err.message : '网络无法访问 Gitee';
+            lastSyncError = (err && err.message) ? err.message : '网络无法访问 GitHub';
         }
         setSyncStatus('offline');
         if(err && /auth/.test(err.message)) throw err;
@@ -460,24 +464,25 @@ function pullFromCloud(force) {
     });
 }
 
-// 配置弹窗保存后，先获取用户名、自动建仓库并拉取一次
+// 配置弹窗保存后，校验令牌、获取用户名并拉取一次
 function applySyncConfig() {
     const token = (document.getElementById('syncToken').value || '').trim();
-    if(!token) { showToast('请填写 Gitee 私人令牌'); return; }
+    const repo = ((document.getElementById('syncRepo') ? document.getElementById('syncRepo').value : '') || '').trim() || 'car-account-pages';
+    if(!token) { showToast('请填写 GitHub 私人令牌'); return; }
     setSyncStatus('syncing');
-    fetch(giteeUrlWithToken('/user', token)).then(r => {
+    ghFetch('/user', {headers: {'Authorization':'token ' + token, 'Accept':'application/vnd.github+json'}}).then(r => {
         if(r.status === 401) throw new Error('auth');
         if(!r.ok) throw new Error('user ' + r.status);
         return r.json();
     }).then(user => {
-        saveSyncCfg({token, owner: user.login, repo: GITEE_REPO});
+        saveSyncCfg({token, owner: user.login, repo: repo});
         closeModal('syncModal');
-        showToast('正在创建仓库并拉取最新数据…');
-        return giteeEnsureRepo().then(() => pullFromCloud());
+        showToast('正在连接 GitHub 并拉取最新数据…');
+        return pullFromCloud();
     }).then(adopted => finishConnect(adopted))
     .catch(err => {
         lastSyncError = (err && err.message) ? err.message : '连接失败';
-        if(err && /auth/.test(err.message)) showToast('令牌无效，请检查是否复制完整（Gitee 私人令牌只显示一次）');
+        if(err && /auth/.test(err.message)) showToast('令牌无效，请检查是否复制完整（GitHub 私人令牌只显示一次）');
         else showToast('连接失败：' + (err.message || '未知错误'));
         setSyncStatus('offline');
     });
@@ -485,16 +490,16 @@ function applySyncConfig() {
 function finishConnect(adopted) {
     renderVehicleNav();
     navigateTo('dashboard');
-    if(adopted) showToast('已连接到 Gitee，数据已是最新');
-    else showToast('已连接 Gitee，云端暂无数据，将使用本地数据');
+    if(adopted) showToast('已连接到 GitHub，数据已是最新');
+    else showToast('已连接 GitHub，云端暂无数据，将使用本地数据');
 }
-// 用弹窗当前填写的令牌测试 Gitee 连通性（不保存配置）
+// 用弹窗当前填写的令牌测试 GitHub 连通性（不保存配置）
 function testConnection() {
     const token = (document.getElementById('syncToken').value || '').trim();
-    if(!token) { showToast('请先填写 Gitee 私人令牌再测试'); return; }
+    if(!token) { showToast('请先填写 GitHub 私人令牌再测试'); return; }
     const btn = document.getElementById('syncTestBtn');
     if(btn) { btn.disabled = true; btn.textContent = '测试中…'; }
-    fetch(giteeUrlWithToken('/user', token))
+    ghFetch('/user', {headers: {'Authorization':'token ' + token, 'Accept':'application/vnd.github+json'}})
         .then(r => {
             if(r.ok) return r.json().then(u => ({ok:true, login: u.login}));
             if(r.status === 401) return {ok:false, reason:'令牌无效，请检查是否复制完整'};
@@ -504,7 +509,7 @@ function testConnection() {
             if(res.ok) showToast('连接成功！用户名：' + res.login + '，可点击「保存并连接」');
             else showToast('连接失败：' + res.reason);
         })
-        .catch(() => showToast('连接失败：网络无法访问 Gitee，请检查网络'))
+        .catch(() => showToast('连接失败：网络无法访问 GitHub，请检查网络'))
         .finally(() => { if(btn) { btn.disabled = false; btn.textContent = '测试连接'; } });
 }
 
@@ -1609,6 +1614,8 @@ function openSyncModal() {
     const m = document.getElementById('syncModal');
     if(syncCfg) {
         document.getElementById('syncToken').value = syncCfg.token || '';
+        const repoInput = document.getElementById('syncRepo');
+        if(repoInput) repoInput.value = syncCfg.repo || 'car-account-pages';
     }
     renderSyncStatusPanel();
     m.classList.remove('hidden');
@@ -1620,7 +1627,7 @@ function renderSyncStatusPanel() {
     const panel = document.getElementById('syncStatusPanel');
     if(!panel) return;
     if(!syncReady()) {
-        panel.innerHTML = '<div class="text-xs text-gray-500">尚未配置 Gitee 同步。填写令牌并「保存并连接」后，数据会自动同步到云端。</div>';
+        panel.innerHTML = '<div class="text-xs text-gray-500">尚未配置 GitHub 同步。填写令牌并「保存并连接」后，数据会自动同步到云端。</div>';
         return;
     }
     const status = document.getElementById('syncDot').classList.contains('sync-online') ? 'online' : (document.getElementById('syncDot').classList.contains('sync-syncing') ? 'syncing' : 'offline');
@@ -1645,7 +1652,7 @@ function escapeHtml(str) {
 }
 
 function retrySync() {
-    if(!syncReady()) { showToast('尚未配置 Gitee 同步'); return; }
+    if(!syncReady()) { showToast('尚未配置 GitHub 同步'); return; }
     showToast('正在重新同步…');
     const doPull = () => pullFromCloud(true).then(adopted => {
         if(adopted) {
@@ -1669,7 +1676,7 @@ function retrySync() {
 }
 
 function clearSyncConfig() {
-    if(!confirm('确定清除 Gitee 同步配置吗？本地数据不会删除，但不会再自动同步到云端。')) return;
+    if(!confirm('确定清除 GitHub 同步配置吗？本地数据不会删除，但不会再自动同步到云端。')) return;
     syncCfg = null;
     lastSyncError = null;
     lastSyncAt = null;
@@ -1760,7 +1767,7 @@ function applyReadOnlyMode() {
         document.body.classList.toggle('read-only-mode', isReadOnlyMode);
     }
     if(!isReadOnlyMode) return;
-    // 云端同步控件豁免：只读模式仍允许配置 Gitee 同步，否则链接版永远无法拉取桌面端最新数据
+    // 云端同步控件豁免：只读模式仍允许配置 GitHub 同步，否则链接版永远无法拉取桌面端最新数据
     const isSyncControl = (el) => {
         if(!el) return false;
         if(el.closest && el.closest('#syncModal')) return true;            // 同步弹窗内所有元素
@@ -5922,7 +5929,7 @@ try {
         });
     } else if(isReadOnlyMode) {
         // 只读链接模式但未配置同步：提示用户配置，否则链接只会显示旧数据
-        setTimeout(() => showToast('当前为只读查看模式：点击右上角「同步设置」粘贴 Gitee 令牌，即可加载与桌面端一致的实时数据', 6000), 1200);
+        setTimeout(() => showToast('当前为只读查看模式：点击右上角「同步设置」粘贴 GitHub 令牌，即可加载与桌面端一致的实时数据', 6000), 1200);
     }
     // ESC 退出截图模式
     document.addEventListener('keydown', e => {
@@ -5991,26 +5998,30 @@ try {
     </div>
 </div>
 
-<!-- 云端同步配置弹窗（Gitee 码云） -->
+<!-- 云端同步配置弹窗（GitHub） -->
 <div id="syncModal" class="fixed inset-0 bg-black/40 hidden items-center justify-center z-50">
     <div class="bg-white rounded-xl shadow-2xl w-[34rem] max-w-[92vw] p-5 fade-in">
         <div class="flex items-center justify-between mb-4">
-            <h3 class="text-lg font-bold text-gray-800"><i class="fas fa-cloud text-blue-600 mr-2"></i>云端同步设置</h3>
+            <h3 class="text-lg font-bold text-gray-800"><i class="fas fa-cloud text-blue-600 mr-2"></i>云端同步设置（GitHub）</h3>
             <button onclick="closeModal('syncModal')" class="text-gray-400 hover:text-gray-600"><i class="fas fa-times"></i></button>
         </div>
-        <p class="text-sm text-gray-600 mb-3">配置后，任意一端（桌面文件或永久链接）保存数据都会自动同步到你的 Gitee 私有仓库，其他人在打开时即可看到最新数据，无需手动导入导出。</p>
+        <p class="text-sm text-gray-600 mb-3">配置后，桌面文件保存数据会自动同步到你的 GitHub 私有仓库，永久链接每次打开即拉取最新数据，无需手动导入导出。</p>
         <div class="space-y-3">
             <div id="syncStatusPanel" class="bg-gray-50 border border-gray-200 rounded-lg p-3"></div>
             <div>
-                <label class="block text-xs font-medium text-gray-600 mb-1">Gitee 私人令牌 <span class="text-red-500">*</span></label>
-                <input id="syncToken" class="table-input w-full text-left" placeholder="Gitee → 设置 → 私人令牌 里生成的 token（只显示一次，请妥善保存）">
+                <label class="block text-xs font-medium text-gray-600 mb-1">GitHub 私人令牌 <span class="text-red-500">*</span></label>
+                <input id="syncToken" class="table-input w-full text-left" placeholder="ghp_ 开头的 Personal Access Token（勾选 repo 权限，只显示一次）">
+            </div>
+            <div>
+                <label class="block text-xs font-medium text-gray-600 mb-1">仓库名</label>
+                <input id="syncRepo" class="table-input w-full text-left" value="car-account-pages" placeholder="car-account-pages">
             </div>
             <div class="flex justify-end -mt-1">
                 <button id="syncTestBtn" onclick="testConnection()" class="text-xs px-3 py-1.5 border border-blue-300 text-blue-600 rounded-lg hover:bg-blue-50 transition">测试连接</button>
             </div>
             <div class="bg-blue-50 border border-blue-100 rounded-lg p-3 text-xs text-blue-700 leading-relaxed">
-                <b>怎么拿令牌？</b> 打开 <span class="font-mono">gitee.com</span> 登录 → 右上角头像 <b>设置 → 私人令牌 → 生成新令牌</b>，权限勾选 <b>projects</b>，复制生成的 token 填到上面。<br>
-                保存后系统会<b>自动创建名为 car-account-sync 的私有仓库</b>并写入数据，无需手动建仓库。数据仅你与合伙人可见。
+                <b>怎么拿令牌？</b> 打开 <span class="font-mono">github.com</span> 登录 → 右上角头像 <b>Settings → Developer settings → Personal access tokens → Tokens (classic) → Generate new token</b>，权限勾选 <b>repo</b>，复制生成的 <b>ghp_...</b> 填到上面。<br>
+                保存后系统会<b>自动在你的私有仓库建立 data 分支</b>并写入数据（Pages 用的是 main 分支，数据文件不会被公开）。数据仅你本人可见。
             </div>
         </div>
         <div class="flex gap-2 mt-5">
