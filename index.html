@@ -95,8 +95,9 @@
         body.screenshot-mode .data-table td,
         body.screenshot-mode .data-table th { padding: 12px 14px; font-size: 16px; line-height: 1.5; white-space: nowrap; }
         body.screenshot-mode .data-table tr { min-height: 56px; height: auto; }
-        body.screenshot-mode .table-input { padding: 8px 10px; font-size: 17px; border-radius: 4px; font-weight: 700; color: #111827; }
+        body.screenshot-mode .table-input { padding: 8px 10px; font-size: 17px; line-height: 1.5; border-radius: 4px; font-weight: 700; color: #111827; box-sizing: border-box; min-height: 38px; }
         body.screenshot-mode .data-table thead th { font-size: 14px; padding: 12px 12px; }
+        body.screenshot-mode .screenshot-empty-row { display: none !important; }
         body.screenshot-mode .space-y-4 > * + * { margin-top: 14px !important; }
         body.screenshot-mode .app-header { display: none !important; }
         body.screenshot-mode .layer-switch-bar { display: none !important; }
@@ -834,6 +835,21 @@ function screenshotPlatform(platformKey, platformName) {
     });
 }
 
+// 截图前临时隐藏无数据的空行，让长图更紧凑、数据更突出
+function hideEmptyRowsForScreenshot(root) {
+    const rows = root.querySelectorAll('.data-table tbody tr');
+    rows.forEach(tr => {
+        if(tr.classList.contains('summary-row')) return;
+        const inputs = tr.querySelectorAll('input');
+        if(!inputs.length) return;
+        const hasValue = Array.from(inputs).some(inp => (inp.value || '').trim() !== '');
+        if(!hasValue) tr.classList.add('screenshot-empty-row');
+    });
+}
+function showEmptyRowsAfterScreenshot(root) {
+    root.querySelectorAll('.screenshot-empty-row').forEach(tr => tr.classList.remove('screenshot-empty-row'));
+}
+
 // 整页长截图：把当前内容区完整渲染为 PNG 并触发下载
 function screenshotFullPage() {
     if(typeof html2canvas === 'undefined') {
@@ -862,6 +878,8 @@ function screenshotFullPage() {
     const prevWrapTransform = wrap ? wrap.style.transform : '';
     const prevWrapWidth = wrap ? wrap.style.width : '';
     if(wrap) { wrap.style.transform = 'none'; wrap.style.width = ''; }
+    // 截图时隐藏无数据的空行
+    hideEmptyRowsForScreenshot(target);
 
     const now = new Date();
     const pad = n => String(n).padStart(2, '0');
@@ -877,6 +895,7 @@ function screenshotFullPage() {
         target.style.overflow = prevOverflow;
         target.style.height = prevHeight;
         if(wrap) { wrap.style.transform = prevWrapTransform; wrap.style.width = prevWrapWidth; }
+        showEmptyRowsAfterScreenshot(target);
         hidden.forEach(el => el.style.visibility = '');
         const fileName = `截图_租车记账_整页长图_${ts}.png`;
         saveCanvasAsPng(canvas, fileName);
@@ -885,6 +904,7 @@ function screenshotFullPage() {
         target.style.overflow = prevOverflow;
         target.style.height = prevHeight;
         if(wrap) { wrap.style.transform = prevWrapTransform; wrap.style.width = prevWrapWidth; }
+        showEmptyRowsAfterScreenshot(target);
         hidden.forEach(el => el.style.visibility = '');
         showToast('截图失败：' + (err && err.message ? err.message : err));
     });
