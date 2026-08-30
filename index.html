@@ -53,7 +53,8 @@
             color: #111827 !important;
             opacity: 1 !important;
             border: 1px solid #d1d5db !important;
-            min-height: 18px;
+            min-height: 30px;
+            font-weight: 700;
         }
 
         /* Tables */
@@ -89,13 +90,14 @@
         .layer-tab { min-width: 120px; padding: 14px 22px; font-size: 17px; font-weight: 700; }
         .layer-switch-bar { justify-content: flex-start !important; }
 
-        /* 截图适配模式：增大行高/字号，让整页长图放大后仍能看清每行明细 */
+        /* 截图适配模式：进一步增大行高/字号/字重，让整页长图放大后数字仍清晰可读 */
+        body.screenshot-mode .data-table { table-layout: auto !important; min-width: 1200px !important; }
         body.screenshot-mode .data-table td,
-        body.screenshot-mode .data-table th { padding: 10px 12px; font-size: 14px; line-height: 1.5; }
-        body.screenshot-mode .data-table tr { height: 42px; }
-        body.screenshot-mode .table-input { padding: 6px 8px; font-size: 15px; border-radius: 4px; }
-        body.screenshot-mode .data-table thead th { font-size: 13px; padding: 10px 10px; }
-        body.screenshot-mode .space-y-4 > * + * { margin-top: 12px !important; }
+        body.screenshot-mode .data-table th { padding: 12px 14px; font-size: 16px; line-height: 1.5; white-space: nowrap; }
+        body.screenshot-mode .data-table tr { min-height: 56px; height: auto; }
+        body.screenshot-mode .table-input { padding: 8px 10px; font-size: 17px; border-radius: 4px; font-weight: 700; color: #111827; }
+        body.screenshot-mode .data-table thead th { font-size: 14px; padding: 12px 12px; }
+        body.screenshot-mode .space-y-4 > * + * { margin-top: 14px !important; }
         body.screenshot-mode .app-header { display: none !important; }
         body.screenshot-mode .layer-switch-bar { display: none !important; }
         body.screenshot-mode #shadow-nav-section { display: none !important; }
@@ -861,7 +863,7 @@ function screenshotFullPage() {
     const ts = `${now.getFullYear()}${pad(now.getMonth()+1)}${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}`;
 
     html2canvas(target, {
-        scale: 2,
+        scale: 3,
         backgroundColor: '#f1f5f9',
         logging: false,
         useCORS: true,
