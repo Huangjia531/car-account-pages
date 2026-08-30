@@ -98,6 +98,13 @@
         body.screenshot-mode .table-input { padding: 8px 10px; font-size: 17px; line-height: 1.5; border-radius: 4px; font-weight: 700; color: #111827; box-sizing: border-box; min-height: 38px; }
         body.screenshot-mode .data-table thead th { font-size: 14px; padding: 12px 12px; }
         body.screenshot-mode .screenshot-empty-row { display: none !important; }
+        /* 截图时把 input 替换成 span，彻底避免输入框 overflow 导致数字被截 */
+        body.screenshot-mode .screenshot-input-span {
+            display: inline-block; width: 100%; padding: 8px 10px; font-size: 17px; line-height: 1.5;
+            border-radius: 4px; font-weight: 700; color: #111827; background: #ffffff;
+            border: 1px solid #d1d5db; text-align: center; box-sizing: border-box; min-height: 38px;
+            white-space: nowrap; overflow: visible;
+        }
         body.screenshot-mode .space-y-4 > * + * { margin-top: 14px !important; }
         body.screenshot-mode .app-header { display: none !important; }
         body.screenshot-mode .layer-switch-bar { display: none !important; }
@@ -850,6 +857,32 @@ function showEmptyRowsAfterScreenshot(root) {
     root.querySelectorAll('.screenshot-empty-row').forEach(tr => tr.classList.remove('screenshot-empty-row'));
 }
 
+// 截图前把 input.table-input 替换成等效 span，避免 html2canvas/input 渲染时文字被截
+function replaceInputsForScreenshot(root) {
+    const inputs = root.querySelectorAll('input.table-input');
+    const replaced = [];
+    inputs.forEach(inp => {
+        const span = document.createElement('span');
+        span.className = 'screenshot-input-span';
+        if(inp.classList.contains('text-red-600')) span.classList.add('text-red-600');
+        if(inp.classList.contains('text-purple-700')) span.classList.add('text-purple-700');
+        if(inp.classList.contains('bg-purple-50')) span.classList.add('bg-purple-50');
+        if(inp.classList.contains('font-semibold')) span.classList.add('font-semibold');
+        if(inp.readOnly || inp.disabled) span.classList.add('screenshot-input-readonly');
+        span.textContent = inp.value;
+        inp.parentNode.insertBefore(span, inp);
+        inp.style.display = 'none';
+        replaced.push({inp, span});
+    });
+    return replaced;
+}
+function restoreInputsAfterScreenshot(replaced) {
+    replaced.forEach(({inp, span}) => {
+        if(span && span.parentNode) span.parentNode.removeChild(span);
+        inp.style.display = '';
+    });
+}
+
 // 整页长截图：把当前内容区完整渲染为 PNG 并触发下载
 function screenshotFullPage() {
     if(typeof html2canvas === 'undefined') {
@@ -878,8 +911,9 @@ function screenshotFullPage() {
     const prevWrapTransform = wrap ? wrap.style.transform : '';
     const prevWrapWidth = wrap ? wrap.style.width : '';
     if(wrap) { wrap.style.transform = 'none'; wrap.style.width = ''; }
-    // 截图时隐藏无数据的空行
+    // 截图时隐藏无数据的空行，并把 input 替换成 span 避免文字被截
     hideEmptyRowsForScreenshot(target);
+    const replacedInputs = replaceInputsForScreenshot(target);
 
     const now = new Date();
     const pad = n => String(n).padStart(2, '0');
@@ -896,6 +930,7 @@ function screenshotFullPage() {
         target.style.height = prevHeight;
         if(wrap) { wrap.style.transform = prevWrapTransform; wrap.style.width = prevWrapWidth; }
         showEmptyRowsAfterScreenshot(target);
+        restoreInputsAfterScreenshot(replacedInputs);
         hidden.forEach(el => el.style.visibility = '');
         const fileName = `截图_租车记账_整页长图_${ts}.png`;
         saveCanvasAsPng(canvas, fileName);
@@ -905,6 +940,7 @@ function screenshotFullPage() {
         target.style.height = prevHeight;
         if(wrap) { wrap.style.transform = prevWrapTransform; wrap.style.width = prevWrapWidth; }
         showEmptyRowsAfterScreenshot(target);
+        restoreInputsAfterScreenshot(replacedInputs);
         hidden.forEach(el => el.style.visibility = '');
         showToast('截图失败：' + (err && err.message ? err.message : err));
     });
