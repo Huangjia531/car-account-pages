@@ -89,17 +89,19 @@
         .layer-tab { min-width: 120px; padding: 14px 22px; font-size: 17px; font-weight: 700; }
         .layer-switch-bar { justify-content: flex-start !important; }
 
-        /* 截图适配模式：保留清晰可读，方便整页长图后放大查看明细 */
+        /* 截图适配模式：增大行高/字号，让整页长图放大后仍能看清每行明细 */
         body.screenshot-mode .data-table td,
-        body.screenshot-mode .data-table th { padding: 6px 8px; font-size: 12px; }
-        body.screenshot-mode .table-input { padding: 4px 6px; font-size: 13px; border-radius: 4px; }
-        body.screenshot-mode .data-table thead th { font-size: 11px; padding: 6px 6px; }
-        body.screenshot-mode .space-y-4 > * + * { margin-top: 8px !important; }
+        body.screenshot-mode .data-table th { padding: 10px 12px; font-size: 14px; line-height: 1.5; }
+        body.screenshot-mode .data-table tr { height: 42px; }
+        body.screenshot-mode .table-input { padding: 6px 8px; font-size: 15px; border-radius: 4px; }
+        body.screenshot-mode .data-table thead th { font-size: 13px; padding: 10px 10px; }
+        body.screenshot-mode .space-y-4 > * + * { margin-top: 12px !important; }
         body.screenshot-mode .app-header { display: none !important; }
         body.screenshot-mode .layer-switch-bar { display: none !important; }
+        body.screenshot-mode #shadow-nav-section { display: none !important; }
         body.screenshot-mode .no-screenshot { display: none !important; }
         body.screenshot-mode #screenshot-bar { display: none !important; }
-        body.screenshot-mode #content-area { padding: 16px; }
+        body.screenshot-mode #content-area { padding: 20px; }
         body.screenshot-mode main { overflow: visible !important; }
         body.screenshot-mode .rounded-xl { border-radius: 10px; }
         body.screenshot-mode .shadow-sm,
@@ -673,8 +675,10 @@ function handleImportFile(input) {
 function toggleScreenshotMode() {
     screenshotMode = !screenshotMode;
     if(screenshotMode) {
+        // 截图只展示主账套内容，若在副账套则自动切回
+        if(currentLayer === 'shadow') switchLayer('real');
         document.body.classList.add('screenshot-mode');
-        showToast('已进入截图模式：浮层/提示小字已隐藏，可滚动后自由截图');
+        showToast('已进入截图模式：已切回主账套，可滚动后自由截图');
     } else {
         document.body.classList.remove('screenshot-mode');
         const area = document.getElementById('content-area');
@@ -695,6 +699,37 @@ function fitToScreen() {
     const scale = Math.min(1, avail / h);
     wrap.style.transformOrigin = 'top center';
     wrap.style.transform = 'scale(' + scale + ')';
+}
+
+// 保存 canvas 为 PNG：优先用 File System Access API 让用户选择保存位置（如 Desktop/截图），否则回退到普通下载
+async function saveCanvasAsPng(canvas, suggestedName) {
+    const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+    if(!blob) { showToast('截图生成失败：无法创建图片数据'); return; }
+    // 浏览器安全上下文（https/localhost）支持 showSaveFilePicker，可让用户直接选 Desktop/截图 文件夹
+    if(window.showSaveFilePicker) {
+        try {
+            const handle = await window.showSaveFilePicker({
+                suggestedName,
+                types: [{description: 'PNG 图片', accept: {'image/png': ['.png']}}]
+            });
+            const writable = await handle.createWritable();
+            await writable.write(blob);
+            await writable.close();
+            showToast('截图已保存：' + handle.name);
+            return;
+        } catch(e) {
+            // 用户取消或 API 不可用，回退到普通下载
+        }
+    }
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = suggestedName;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+    showToast('截图已下载：' + suggestedName + '，可手动放到桌面截图文件夹');
 }
 
 // ==================== 单平台清晰截图（导出 PNG） ====================
@@ -786,12 +821,11 @@ function screenshotPlatform(platformKey, platformName) {
     showToast('正在生成本平台清晰截图…');
 
     html2canvas(node, {scale: 2, backgroundColor: '#ffffff', logging: false}).then(canvas => {
-        const link = document.createElement('a');
-        link.download = `租车记账_${platformName}_${year}年${month}月.png`;
-        link.href = canvas.toDataURL('image/png');
-        link.click();
-        document.body.removeChild(node);
-        showToast(`已导出 ${platformName} 清晰截图（${rows.length} 笔）`);
+        const fileName = `截图_租车记账_${platformName}_${year}年${month}月.png`;
+        saveCanvasAsPng(canvas, fileName).then(() => {
+            document.body.removeChild(node);
+            showToast(`已导出 ${platformName} 清晰截图（${rows.length} 笔）`);
+        });
     }).catch(err => {
         if(node.parentNode) document.body.removeChild(node);
         showToast('截图失败：' + (err && err.message ? err.message : err));
@@ -836,11 +870,9 @@ function screenshotFullPage() {
         target.style.overflow = prevOverflow;
         target.style.height = prevHeight;
         hidden.forEach(el => el.style.visibility = '');
-        const link = document.createElement('a');
-        link.download = `租车记账_整页长图_${ts}.png`;
-        link.href = canvas.toDataURL('image/png');
-        link.click();
-        showToast('整页长截图已生成，请在下载中保存到桌面');
+        const fileName = `截图_租车记账_整页长图_${ts}.png`;
+        saveCanvasAsPng(canvas, fileName);
+        showToast('整页长截图已生成');
     }).catch(err => {
         target.style.overflow = prevOverflow;
         target.style.height = prevHeight;
@@ -2718,11 +2750,11 @@ function renderShadowVehicle(container, plate) {
 
     let html = `
         <div class="fade-in space-y-4">
-            <button onclick="navigateTo('shadow')" class="inline-flex items-center gap-2 text-sm text-slate-600 hover:text-slate-900 transition"><i class="fas fa-arrow-left"></i> 返回副账总览</button>
+            <button onclick="navigateTo('shadow')" class="no-screenshot inline-flex items-center gap-2 text-sm text-slate-600 hover:text-slate-900 transition"><i class="fas fa-arrow-left"></i> 返回副账总览</button>
             <div class="bg-gradient-to-r from-slate-600 to-slate-800 rounded-xl p-5 text-white">
                 <div class="flex items-center justify-between">
                     <div>
-                        <span class="inline-block text-xs bg-white/20 px-2 py-0.5 rounded mb-2"><i class="fas fa-book-copy mr-1"></i>副账套</span>
+                        <span class="no-screenshot inline-block text-xs bg-white/20 px-2 py-0.5 rounded mb-2"><i class="fas fa-book-copy mr-1"></i>副账套</span>
                         <h2 class="text-2xl font-bold">${plate}</h2>
                         <p class="text-slate-200 mt-1">${vinfo.model || '未知车型'} ${vinfo.owner ? '(' + vinfo.owner + ')' : ''} · ${month}月</p>
                     </div>
