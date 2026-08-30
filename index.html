@@ -857,6 +857,11 @@ function screenshotFullPage() {
     const prevHeight = target.style.height;
     target.style.overflow = 'visible';
     target.style.height = 'auto';
+    // 如果之前点了「重新适配」，content-wrap 可能被整体缩放，截图会看不清；先恢复原始尺寸
+    const wrap = document.getElementById('content-wrap');
+    const prevWrapTransform = wrap ? wrap.style.transform : '';
+    const prevWrapWidth = wrap ? wrap.style.width : '';
+    if(wrap) { wrap.style.transform = 'none'; wrap.style.width = ''; }
 
     const now = new Date();
     const pad = n => String(n).padStart(2, '0');
@@ -871,6 +876,7 @@ function screenshotFullPage() {
     }).then(canvas => {
         target.style.overflow = prevOverflow;
         target.style.height = prevHeight;
+        if(wrap) { wrap.style.transform = prevWrapTransform; wrap.style.width = prevWrapWidth; }
         hidden.forEach(el => el.style.visibility = '');
         const fileName = `截图_租车记账_整页长图_${ts}.png`;
         saveCanvasAsPng(canvas, fileName);
@@ -878,6 +884,7 @@ function screenshotFullPage() {
     }).catch(err => {
         target.style.overflow = prevOverflow;
         target.style.height = prevHeight;
+        if(wrap) { wrap.style.transform = prevWrapTransform; wrap.style.width = prevWrapWidth; }
         hidden.forEach(el => el.style.visibility = '');
         showToast('截图失败：' + (err && err.message ? err.message : err));
     });
