@@ -1063,26 +1063,10 @@ function createEmptyMonthData() {
         },
         vehicles: vehicles,
         otherExpenses: [],
-        publicAccount: [
-            {month:'1月', amount:-3567.28}, {month:'2月', amount:71072.58}, {month:'3月', amount:-28641.95},
-            {month:'4月', amount:-14199.62}, {month:'5月', amount:6542.65}, {month:'6月', amount:0},
-            {month:'7月', amount:0}, {month:'8月', amount:1128}, {month:'9月', amount:-3037.18},
-            {month:'10月', amount:17350.87}, {month:'11月', amount:9238.8}, {month:'12月', amount:9029.7}
-        ],
-        wechatAccount: [
-            {month:'1月', amount:17020.2, expense:17020.2, remark:''},
-            {month:'2月', amount:7197.79, expense:6247.79, remark:''},
-            {month:'3月', amount:15191.53, expense:15191.53, remark:''},
-            {month:'4月', amount:16018.24, expense:16018.24, remark:'-20000工资'},
-            {month:'5月', amount:5386.84, expense:5386.84, remark:'20000工资'},
-            {month:'6月', amount:0, expense:0, remark:''},
-            {month:'7月', amount:0, expense:0, remark:''},
-            {month:'8月', amount:3331.4, expense:0, remark:''},
-            {month:'9月', amount:1811.55, expense:6835.55, remark:'1125,4000'},
-            {month:'10月', amount:3318.64, expense:3318.64, remark:''},
-            {month:'11月', amount:-13871.66, expense:-13871.66, remark:''},
-            {month:'12月', amount:-645.39, expense:-645.39, remark:''}
-        ]
+        // 公户/微信结余：新月份默认为空，由 getMonthData 从最近的上一个月继承用户数据；
+        // 不再预置任何模板值，避免自动改动用户手动维护的结余数据
+        publicAccount: [],
+        wechatAccount: []
     };
 }
 
@@ -1392,6 +1376,38 @@ function saveData() {
     pushToCloud();
 }
 
+// 新月份创建时，公户/微信结余从最近的一个过去月份原样继承（上个月多少，下个月还是多少）；
+// 只复制、不回写：之后用户在各月手动修改互不影响，系统也绝不自动改动这两个表。
+function inheritAccountsFromPrevMonth(key, md) {
+    const parts = String(key).split('-');
+    if(parts.length !== 2 || !md) return;
+    const y = parseInt(parts[0], 10), m = parseInt(parts[1], 10);
+    if(isNaN(y) || isNaN(m)) return;
+    const prevKey = m === 1 ? (y - 1) + '-12' : y + '-' + (m - 1);
+    let src = appData.months && appData.months[prevKey];
+    if(!src) {
+        // 上一个月不存在时，取已存在月份中离当前月最近的一个（处理跳月/跨年）
+        let bestKey = null, bestNum = -Infinity;
+        const curNum = y * 12 + (m - 1);
+        Object.keys(appData.months || {}).forEach(k => {
+            const p = String(k).split('-');
+            if(p.length !== 2) return;
+            const ky = parseInt(p[0], 10), km = parseInt(p[1], 10);
+            if(isNaN(ky) || isNaN(km)) return;
+            const num = ky * 12 + (km - 1);
+            if(num < curNum && num > bestNum) { bestNum = num; bestKey = k; }
+        });
+        src = bestKey ? appData.months[bestKey] : null;
+    }
+    if(!src) return;
+    if(Array.isArray(src.publicAccount) && src.publicAccount.length > 0) {
+        md.publicAccount = JSON.parse(JSON.stringify(src.publicAccount));
+    }
+    if(Array.isArray(src.wechatAccount) && src.wechatAccount.length > 0) {
+        md.wechatAccount = JSON.parse(JSON.stringify(src.wechatAccount));
+    }
+}
+
 function getMonthData() {
     const year = appData.currentYear;
     const month = document.getElementById('monthSelect').value;
@@ -1403,6 +1419,8 @@ function getMonthData() {
             appData.months[key] = JSON.parse(JSON.stringify(appData.months[altKey]));
         } else {
             appData.months[key] = createEmptyMonthData();
+            // 公户/微信结余：继承最近上个月的数据（不改动上个月，只是复制过来）
+            inheritAccountsFromPrevMonth(key, appData.months[key]);
             autoGeneratePartnerShareForNewMonth(key);
         }
     }
