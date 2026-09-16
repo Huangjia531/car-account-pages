@@ -1312,6 +1312,10 @@ function loadData() {
                     });
                 });
             });
+            // 一次性清理：旧版本 createEmptyMonthData 会给每个新月份预置一整套 12 个月的历史模板数据，
+            // 导致用户从未填过的月份（如 2026-7）也显示一堆莫名金额。这里把「与模板完全一致」的表
+            // 重置为 12 行全 0（保留月份结构）；用户改过任何一个值的表都视为真实数据，绝不触碰。
+            cleanupPresetAccountRows(appData.months);
         } else {
             appData = getDefaultData();
             appData.customVehicles = [];
@@ -1374,6 +1378,61 @@ function saveData() {
     appData.savedAt = Date.now();
     localStorage.setItem('carAccountData_v5', JSON.stringify(appData));
     pushToCloud();
+}
+
+// 旧版模板数据（与旧 createEmptyMonthData 硬编码值逐字一致），仅用于识别并一次性清理
+function presetAccountTemplates() {
+    return {
+        publicAccount: [
+            {month:'1月', amount:-3567.28}, {month:'2月', amount:71072.58}, {month:'3月', amount:-28641.95},
+            {month:'4月', amount:-14199.62}, {month:'5月', amount:6542.65}, {month:'6月', amount:0},
+            {month:'7月', amount:0}, {month:'8月', amount:1128}, {month:'9月', amount:-3037.18},
+            {month:'10月', amount:17350.87}, {month:'11月', amount:9238.8}, {month:'12月', amount:9029.7}
+        ],
+        wechatAccount: [
+            {month:'1月', amount:17020.2, expense:17020.2, remark:''},
+            {month:'2月', amount:7197.79, expense:6247.79, remark:''},
+            {month:'3月', amount:15191.53, expense:15191.53, remark:''},
+            {month:'4月', amount:16018.24, expense:16018.24, remark:'-20000工资'},
+            {month:'5月', amount:5386.84, expense:5386.84, remark:'20000工资'},
+            {month:'6月', amount:0, expense:0, remark:''},
+            {month:'7月', amount:0, expense:0, remark:''},
+            {month:'8月', amount:3331.4, expense:0, remark:''},
+            {month:'9月', amount:1811.55, expense:6835.55, remark:'1125,4000'},
+            {month:'10月', amount:3318.64, expense:3318.64, remark:''},
+            {month:'11月', amount:-13871.66, expense:-13871.66, remark:''},
+            {month:'12月', amount:-645.39, expense:-645.39, remark:''}
+        ]
+    };
+}
+function matchPresetAccountRows(arr, preset, withExpense) {
+    if(!Array.isArray(arr) || arr.length !== preset.length) return false;
+    const eq = (a, b) => Math.abs((parseFloat(a) || 0) - (parseFloat(b) || 0)) < 0.005;
+    return preset.every((p, i) => {
+        const r = arr[i];
+        if(!r) return false;
+        if(String(r.month == null ? '' : r.month).replace(/\s/g, '') !== p.month) return false;
+        if(!eq(r.amount, p.amount)) return false;
+        if(withExpense) {
+            if(!eq(r.expense, p.expense)) return false;
+            if(String(r.remark == null ? '' : r.remark).trim() !== String(p.remark || '').trim()) return false;
+        }
+        return true;
+    });
+}
+// 把「与模板完全一致」的公户/微信表重置为 12 行全 0（保留月份结构）；用户改过任何值的不动
+function cleanupPresetAccountRows(months) {
+    const tpl = presetAccountTemplates();
+    const zeroPublic = () => Array.from({length: 12}, (_, i) => ({month: (i + 1) + '月', amount: 0}));
+    const zeroWechat = () => Array.from({length: 12}, (_, i) => ({month: (i + 1) + '月', amount: 0, expense: 0, remark: ''}));
+    Object.values(months || {}).forEach(md => {
+        if(matchPresetAccountRows(md.publicAccount, tpl.publicAccount, false)) {
+            md.publicAccount = zeroPublic();
+        }
+        if(matchPresetAccountRows(md.wechatAccount, tpl.wechatAccount, true)) {
+            md.wechatAccount = zeroWechat();
+        }
+    });
 }
 
 // 新月份创建时，公户/微信结余从最近的一个过去月份原样继承（上个月多少，下个月还是多少）；
