@@ -1510,7 +1510,12 @@ function recalcShadowVehicleFromOrders(v) {
         if(!v.orders[pf]) v.orders[pf] = Array(DEFAULT_ORDER_ROWS).fill(null).map(createEmptyOrder);
         v.orders[pf].forEach(o => {
             if(pf === 'wukong' && (parseFloat(o.rentalFee) || 0) > 0) {
-                o.actualIncome = Math.round(((parseFloat(o.rentalFee) || 0) - (parseFloat(o.platformFee) || 0) - (parseFloat(o.pickupFee) || 0)) * 100) / 100;
+                // 对账单导入的行：实收 = 返款金额 − 取送费（不被订单金额公式覆盖）
+                if(o.incomeMode === 'refund') {
+                    o.actualIncome = Math.round(((parseFloat(o.refundFee) || 0) - (parseFloat(o.pickupFee) || 0)) * 100) / 100;
+                } else {
+                    o.actualIncome = Math.round(((parseFloat(o.rentalFee) || 0) - (parseFloat(o.platformFee) || 0) - (parseFloat(o.pickupFee) || 0)) * 100) / 100;
+                }
             }
         });
         const sum = sumOrders(v.orders[pf]);
@@ -2907,7 +2912,7 @@ function renderShadowVehicle(container, plate) {
                                     <td class="px-2 py-1.5"><input class="table-input w-full text-center" value="${o.pickupFee}" onchange="updateShadowOrder('${plate}','${pf.key}',${i},'pickupFee',this.value)" type="number" step="0.01"></td>
                                     <td class="px-2 py-1.5"><input class="table-input w-full text-center" value="${o.platformFee}" onchange="updateShadowOrder('${plate}','${pf.key}',${i},'platformFee',this.value)" type="number" step="0.01"></td>
                                     <td class="px-2 py-1.5">${isWukong
-                                        ? `<input class="table-input w-full text-center bg-purple-50 text-purple-700 font-semibold" value="${o.actualIncome}" readonly title="悟空实收自动计算：订单金额 − 平台费 − 取送费">`
+                                        ? `<input class="table-input w-full text-center bg-purple-50 text-purple-700 font-semibold" value="${o.actualIncome}" readonly title="${o.incomeMode === 'refund' ? '悟空对账单导入：实收 = 返款金额 − 取送费' : '悟空实收自动计算：订单金额 − 平台费 − 取送费'}">`
                                         : `<input class="table-input w-full text-center" value="${o.actualIncome}" onchange="updateShadowOrder('${plate}','${pf.key}',${i},'actualIncome',this.value)" type="number" step="0.01">`}</td>
                                     <td class="px-2 py-1.5 text-center"><input class="table-input w-full text-center" value="${o.period}" onchange="updateShadowOrder('${plate}','${pf.key}',${i},'period',this.value)"></td>
                                     <td class="px-2 py-1.5"><input class="table-input w-full text-center" value="${o.pickupTime}" onchange="updateShadowOrder('${plate}','${pf.key}',${i},'pickupTime',this.value)"></td>
@@ -3027,7 +3032,7 @@ function renderVehicleDetail(container, plate) {
                                     <td class="px-2 py-1.5"><input class="table-input w-full text-center" value="${o.pickupFee}" onchange="updateOrder('${plate}','${pf.key}',${i},'pickupFee',this.value)" type="number" step="0.01"></td>
                                     <td class="px-2 py-1.5"><input class="table-input w-full text-center" value="${o.platformFee}" onchange="updateOrder('${plate}','${pf.key}',${i},'platformFee',this.value)" type="number" step="0.01"></td>
                                     <td class="px-2 py-1.5">${isWukong
-                                        ? `<input class="table-input w-full text-center bg-purple-50 text-purple-700 font-semibold" value="${o.actualIncome}" readonly title="悟空实收自动计算：订单金额 − 平台费 − 取送费">`
+                                        ? `<input class="table-input w-full text-center bg-purple-50 text-purple-700 font-semibold" value="${o.actualIncome}" readonly title="${o.incomeMode === 'refund' ? '悟空对账单导入：实收 = 返款金额 − 取送费' : '悟空实收自动计算：订单金额 − 平台费 − 取送费'}">`
                                         : `<input class="table-input w-full text-center" value="${o.actualIncome}" onchange="updateOrder('${plate}','${pf.key}',${i},'actualIncome',this.value)" type="number" step="0.01">`}</td>
                                     <td class="px-2 py-1.5"><input class="table-input w-full text-center" value="${o.period}" onchange="updateOrder('${plate}','${pf.key}',${i},'period',this.value)"></td>
                                     <td class="px-2 py-1.5"><input class="table-input w-full text-center" value="${o.pickupTime}" onchange="updateOrder('${plate}','${pf.key}',${i},'pickupTime',this.value)"></td>
@@ -3047,7 +3052,7 @@ function renderVehicleDetail(container, plate) {
                 </div>
                 <div class="text-xs text-gray-500 mt-2 px-1">
                 ${isWukong
-                    ? '悟空：订单金额 / 平台费 / 取送费 手动录入，实收按公式自动计算：实收 = 订单金额 − 平台费 − 取送费（无需手填，改前三项即自动联动）。'
+                    ? '悟空：订单金额 / 平台费 / 取送费 手动录入，实收按公式自动计算：实收 = 订单金额 − 平台费 − 取送费（无需手填，改前三项即自动联动）。导入「悟空对账单」的行按对账单口径：订单金额=订单总计，平台费=平台费，取送费=取送费，实收 = 返款金额 − 取送费。'
                     : (pf.key === 'didi'
                         ? '滴滴：平台费 = 表格「平台应收/平台开票金额」实际值（0即为0），实收 = 订单金额 − 平台费；取送费作为单独收入加回；押金分账等其他费用统一进「其他费用」接口（按平台归集）。'
                         : (pf.key === 'hello'
@@ -3138,7 +3143,8 @@ function renderPlatformSync(container) {
                 '1. 登录悟空租车商家后台',
                 '2. 进入「财务中心 → 结算管理」',
                 '3. 选择对应月份的账单',
-                '4. 点击「导出」下载结算明细'
+                '4. 点击「导出」下载结算明细（对账单）',
+                '5. 导入时只读取 Sheet1：订单金额=订单总计，平台费=平台费，取送费=取送费，实收=返款金额−取送费'
             ]
         }
     ];
@@ -3345,8 +3351,12 @@ function handlePlatformImportMulti(e, platform) {
                     if(!result.orders.length) {
                         result = parseBestPlatformSheet(workbook, platform);
                     }
+                } else if(platform === 'wukong') {
+                    // 悟空：优先按对账单规则解析 Sheet1（订单总计/平台费/取送费/返款金额，实收=返款金额−取送费）
+                    result = parseWukongStatement(workbook);
+                    if(!result.orders.length) result = parseBestPlatformSheet(workbook, platform);
                 } else {
-                    // 其他平台（滴滴/哈啰/悟空）：多工作表文件很常见，不能简单合并所有行。
+                    // 其他平台（滴滴/哈啰）：多工作表文件很常见，不能简单合并所有行。
                     // 合并后不同工作表的列位置不同，会导致表头识别错误、订单解析为0。
                     // 改为逐个 sheet 解析，选择订单最多的工作表；并优先匹配「订单明细/明细」表。
                     result = parseBestPlatformSheet(workbook, platform);
@@ -3446,6 +3456,9 @@ function handleShadowImportMulti(e, platform) {
                     if(orderSheet) orderRows = XLSX.utils.sheet_to_json(workbook.Sheets[orderSheet], {header: 1, defval: ''});
                     if(flowSheet) flowRows = XLSX.utils.sheet_to_json(workbook.Sheets[flowSheet], {header: 1, defval: ''});
                     result = parseCtripOrders(orderRows, flowRows);
+                    if(!result.orders.length) result = parseBestPlatformSheet(workbook, platform);
+                } else if(platform === 'wukong') {
+                    result = parseWukongStatement(workbook);
                     if(!result.orders.length) result = parseBestPlatformSheet(workbook, platform);
                 } else {
                     result = parseBestPlatformSheet(workbook, platform);
@@ -3556,6 +3569,178 @@ function parseBestPlatformSheet(workbook, platform) {
     }
 
     return bestResult;
+}
+
+// ==================== 悟空对账单专用解析 ====================
+// 用户确认口径：只抓 Sheet1；
+// 订单金额 = 表格「订单总计」列；平台费 = 「平台费」列；取送费 = 「取送费」列；
+// 实收 = 「返款金额」列 − 取送费。
+function parseWukongStatement(workbook) {
+    const emptyDiag = () => ({
+        headers: {}, colIndex: {}, headerRowIdx: -1, sheetName: '',
+        totals: {rentalFee:0, rawRentalFee:0, platformFee:0, rawPlatformFee:0, pickupFee:0, actualIncome:0, otherFee:0, stmtIncome:0, refundFee:0},
+        counts: {rows:0, skipped:0, zeroRental:0, zeroPickup:0, zeroPlatform:0, positivePlatform:0, fallbackFee:0},
+        skippedRows: [], fallbackRows: [], zeroPickupRows: [], zeroRentalRows: [], zeroPlatformRows: [], positivePlatformRows: [],
+        allRows: [], sheetCandidates: [], rawSheetRows: [], cellProbe: []
+    });
+    if(!workbook || !workbook.SheetNames || workbook.SheetNames.length === 0) return {orders: [], otherExpenses: [], diagnostics: emptyDiag()};
+
+    // 只抓 Sheet1：优先名为 sheet1 的工作表，否则取第一个工作表
+    const sheetName = workbook.SheetNames.find(n => String(n).trim().toLowerCase() === 'sheet1') || workbook.SheetNames[0];
+    const sheet = workbook.Sheets[sheetName];
+    if(!sheet) return {orders: [], otherExpenses: [], diagnostics: emptyDiag()};
+
+    const rows = XLSX.utils.sheet_to_json(sheet, {header: 1, defval: '', raw: true});
+    const wRows = XLSX.utils.sheet_to_json(sheet, {header: 1, defval: '', raw: false});
+
+    const diagnostics = emptyDiag();
+    diagnostics.sheetName = sheetName;
+    diagnostics.rawSheetRows = wRows.map(row => row.slice(0, 60).map(c => String(c ?? '')));
+
+    const patterns = {
+        plate: ['车牌', '车牌号', '车辆', '号牌'],
+        orderNo: ['订单号', '订单编号', '单号'],
+        platformFee: ['平台费'],
+        pickupFee: ['取送费', '取送服务费'],
+        refundFee: ['返款金额', '返款'],
+        pickupTime: ['取车时间', '取车日期', '开始时间', '用车时间'],
+        returnTime: ['还车时间', '还车日期', '结束时间'],
+        period: ['租期', '天数', '时长']
+    };
+    const norm = s => String(s == null ? '' : s)
+        .replace(/[（(].*?[）)]/g, '')
+        .replace(/[\s,，。:：￥$元]/g, '')
+        .trim().toLowerCase();
+
+    // 找表头行
+    let headerRowIdx = -1, colMap = {};
+    for(let i = 0; i < Math.min(rows.length, 40); i++) {
+        const row = rows[i];
+        if(!row) continue;
+        const temp = {};
+        const used = new Set();
+        const cells = row.map(c => String(c == null ? '' : c).trim());
+
+        // 订单金额：优先「订单总计」，其次「订单总金额/订单总额/订单金额」
+        const amtAliases = ['订单总计', '订单总金额', '订单总额', '订单金额'];
+        let amtFound = false;
+        for(const alias of amtAliases) {
+            for(let col = 0; col < cells.length; col++) {
+                if(used.has(col) || !cells[col]) continue;
+                if(/退款|返还|退回/.test(cells[col])) continue;
+                if(norm(cells[col]).includes(alias)) { temp.rentalFee = col; used.add(col); amtFound = true; break; }
+            }
+            if(amtFound) break;
+        }
+        for(const field in patterns) {
+            for(let col = 0; col < cells.length; col++) {
+                if(used.has(col) || !cells[col]) continue;
+                if(field !== 'refundFee' && /退款|返还|退回/.test(cells[col])) continue;
+                const n = norm(cells[col]);
+                if(!n) continue;
+                if(patterns[field].some(kw => n.includes(kw))) { temp[field] = col; used.add(col); break; }
+            }
+        }
+        if(temp.plate !== undefined && (temp.rentalFee !== undefined || temp.refundFee !== undefined || temp.orderNo !== undefined)) {
+            headerRowIdx = i; colMap = temp; break;
+        }
+    }
+    if(headerRowIdx === -1) return {orders: [], otherExpenses: [], diagnostics};
+
+    for(const field in colMap) {
+        diagnostics.headers[field] = rows[headerRowIdx][colMap[field]] || '';
+        diagnostics.colIndex[field] = colLetter(colMap[field]);
+    }
+    diagnostics.headerRowIdx = headerRowIdx;
+    diagnostics.sheetCandidates.push({
+        sheetName,
+        ordersCount: 0,
+        headerRowIdx,
+        headers: JSON.parse(JSON.stringify(diagnostics.headers)),
+        totals: {},
+        sampleRows: rows.slice(headerRowIdx, Math.min(rows.length, headerRowIdx + 4)).map(r => r.slice(0, 30).map(c => String(c ?? '').replace(/\s+/g, ' ').slice(0, 80)))
+    });
+
+    const orders = [];
+    for(let i = headerRowIdx + 1; i < rows.length; i++) {
+        const row = (wRows && wRows[i]) ? wRows[i] : rows[i];
+        if(!row || row.length === 0) continue;
+        diagnostics.counts.rows++;
+
+        const allText = row.map(c => String(c || '')).join('');
+        if(allText.includes('合计') || allText.includes('总计') || allText.includes('小计')) {
+            diagnostics.counts.skipped++;
+            if(diagnostics.skippedRows.length < 20) diagnostics.skippedRows.push({idx:i, reason:'合计/汇总行', preview:allText.slice(0,60)});
+            continue;
+        }
+        const plate = colMap.plate !== undefined ? str(row[colMap.plate]) : findPlateInRow(row);
+        if(!plate) {
+            diagnostics.counts.skipped++;
+            if(diagnostics.skippedRows.length < 20) diagnostics.skippedRows.push({idx:i, reason:'无车牌', preview:row.slice(0,8).map(c=>String(c||'')).join(' | ')});
+            continue;
+        }
+
+        const rentalFee = colMap.rentalFee !== undefined ? num(row[colMap.rentalFee]) : 0;
+        const platformFee = colMap.platformFee !== undefined ? num(row[colMap.platformFee]) : 0;
+        const pickupFee = colMap.pickupFee !== undefined ? num(row[colMap.pickupFee]) : 0;
+        const refundFee = colMap.refundFee !== undefined ? num(row[colMap.refundFee]) : 0;
+        const pickupTime = colMap.pickupTime !== undefined ? formatDateCell(row[colMap.pickupTime]) : '';
+        const returnTime = colMap.returnTime !== undefined ? formatDateCell(row[colMap.returnTime]) : '';
+        const orderNo = colMap.orderNo !== undefined ? str(row[colMap.orderNo]) : '';
+
+        // 实收 = 返款金额 − 取送费
+        const actualIncome = Math.round((refundFee - pickupFee) * 100) / 100;
+
+        const order = {
+            plate: normalizePlate(plate),
+            orderNo,
+            rentalFee,
+            pickupFee,
+            platformFee,
+            actualIncome,
+            period: colMap.period !== undefined ? str(row[colMap.period]) : calcPeriod(pickupTime, returnTime),
+            pickupTime,
+            returnTime,
+            otherFee: 0,
+            refundFee,
+            incomeMode: 'refund'
+        };
+
+        if(order.rentalFee === 0) diagnostics.counts.zeroRental++;
+        if(order.pickupFee === 0) diagnostics.counts.zeroPickup++;
+        const pfRow = {idx:i, orderNo, plate:order.plate, rentalFee, pickupFee, platformFee, actualIncome};
+        if(order.platformFee === 0) {
+            diagnostics.counts.zeroPlatform++;
+            if(diagnostics.zeroPlatformRows.length < 50) diagnostics.zeroPlatformRows.push(pfRow);
+        } else {
+            diagnostics.counts.positivePlatform++;
+            if(diagnostics.positivePlatformRows.length < 50) diagnostics.positivePlatformRows.push(pfRow);
+        }
+        if(diagnostics.allRows.length < 200) {
+            diagnostics.allRows.push({
+                idx:i, plate:order.plate, orderNo,
+                rawRentalFee: rentalFee, rawPlatformFee: platformFee, rawPickupFee: pickupFee,
+                rentalFee, platformFee, pickupFee, actualIncome, refundFee,
+                rawRow: row.slice(0, 30).map(c => String(c ?? '').replace(/\s+/g, ' ').slice(0, 80)).join(' | ')
+            });
+        }
+        diagnostics.totals.rentalFee += rentalFee;
+        diagnostics.totals.rawRentalFee += rentalFee;
+        diagnostics.totals.platformFee += platformFee;
+        diagnostics.totals.rawPlatformFee += platformFee;
+        diagnostics.totals.pickupFee += pickupFee;
+        diagnostics.totals.actualIncome += actualIncome;
+        diagnostics.totals.refundFee += refundFee;
+
+        if(rentalFee > 0 || actualIncome > 0 || orderNo) orders.push(order);
+        else {
+            diagnostics.counts.skipped++;
+            if(diagnostics.skippedRows.length < 20) diagnostics.skippedRows.push({idx:i, reason:'无有效金额/单号', preview:row.slice(0,8).map(c=>String(c||'')).join(' | ')});
+        }
+    }
+    for(const k in diagnostics.totals) diagnostics.totals[k] = Math.round(diagnostics.totals[k] * 100) / 100;
+    diagnostics.sheetCandidates[0].ordersCount = orders.length;
+    return {orders, otherExpenses: [], colMap, headerRowIdx, diagnostics};
 }
 
 // 单元格级探测：读取每个关键字段单元格的 raw(v)、显示(w)、公式(f)，用于定位显示/缓存不一致
@@ -4681,7 +4866,10 @@ function fillPlatformOrdersToVehicles(orders, platform, targetMd) {
                 actualIncome: order.actualIncome,
                 period: order.period,
                 pickupTime: order.pickupTime,
-                returnTime: order.returnTime
+                returnTime: order.returnTime,
+                // 悟空对账单导入：记录返款金额与实收口径，保证重算时不被公式覆盖
+                refundFee: order.refundFee !== undefined ? order.refundFee : '',
+                incomeMode: order.incomeMode || ''
             };
             filled++;
         });
@@ -4744,11 +4932,16 @@ function autoRecalculateAll() {
     const md = getMonthData();
     Object.keys(md.vehicles).forEach(plate => {
         const v = md.vehicles[plate];
-        // 悟空：实收按公式重算（订单金额 − 平台费 − 取送费），保证存量/未触发编辑的数据总览也正确
+        // 悟空：实收按公式重算（订单金额 − 平台费 − 取送费），保证存量/未触发编辑的数据总览也正确。
+        // 对账单导入的行（incomeMode='refund'）按「返款金额 − 取送费」重算，保留导入口径。
         (v.orders.wukong || []).forEach(o => {
             const rf = parseFloat(o.rentalFee) || 0;
             if(rf > 0 || o.no) {
-                o.actualIncome = Math.round((rf - (parseFloat(o.platformFee)||0) - (parseFloat(o.pickupFee)||0)) * 100) / 100;
+                if(o.incomeMode === 'refund') {
+                    o.actualIncome = Math.round(((parseFloat(o.refundFee)||0) - (parseFloat(o.pickupFee)||0)) * 100) / 100;
+                } else {
+                    o.actualIncome = Math.round((rf - (parseFloat(o.platformFee)||0) - (parseFloat(o.pickupFee)||0)) * 100) / 100;
+                }
             }
         });
         const ds = sumOrders(v.orders.didi);
@@ -4922,12 +5115,17 @@ function applyFormulaToAllMonths() {
                     }
                 });
             });
-            // 悟空：平台费/取送费为人工录入，仅按公式重算实收（订单金额 − 平台费 − 取送费）
+            // 悟空：平台费/取送费为人工录入，仅按公式重算实收（订单金额 − 平台费 − 取送费）；
+            // 对账单导入行（incomeMode='refund'）按「返款金额 − 取送费」保留导入口径
             if(v.orders && v.orders.wukong) {
                 v.orders.wukong.forEach(o => {
                     const rf = parseFloat(o.rentalFee) || 0;
                     if(rf > 0 || o.no) {
-                        o.actualIncome = Math.round((rf - (parseFloat(o.platformFee)||0) - (parseFloat(o.pickupFee)||0)) * 100) / 100;
+                        if(o.incomeMode === 'refund') {
+                            o.actualIncome = Math.round(((parseFloat(o.refundFee)||0) - (parseFloat(o.pickupFee)||0)) * 100) / 100;
+                        } else {
+                            o.actualIncome = Math.round((rf - (parseFloat(o.platformFee)||0) - (parseFloat(o.pickupFee)||0)) * 100) / 100;
+                        }
                     }
                 });
             }
