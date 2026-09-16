@@ -1312,10 +1312,8 @@ function loadData() {
                     });
                 });
             });
-            // 一次性清理：旧版本 createEmptyMonthData 会给每个新月份预置一整套 12 个月的历史模板数据，
-            // 导致用户从未填过的月份（如 2026-7）也显示一堆莫名金额。这里把「与模板完全一致」的表
-            // 重置为 12 行全 0（保留月份结构）；用户改过任何一个值的表都视为真实数据，绝不触碰。
-            cleanupPresetAccountRows(appData.months);
+            // 注意：曾在此处自动清理预置模板数据，但会把继承了该月数据的后续月份一起清空，
+            // 风险过高，已移除自动清理。如需清理模板数据，请用户在对应月份手动修改。
         } else {
             appData = getDefaultData();
             appData.customVehicles = [];
