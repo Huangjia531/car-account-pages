@@ -1435,27 +1435,32 @@ function cleanupPresetAccountRows(months) {
 
 // 新月份创建时，公户/微信结余从最近的一个过去月份原样继承（上个月多少，下个月还是多少）；
 // 只复制、不回写：之后用户在各月手动修改互不影响，系统也绝不自动改动这两个表。
-function inheritAccountsFromPrevMonth(key, md) {
+// 找到离指定月份最近的一个「已存在的过去月份」（优先上一个月，不存在则向前找最近的）
+function findPrevMonthKey(key) {
     const parts = String(key).split('-');
-    if(parts.length !== 2 || !md) return;
+    if(parts.length !== 2) return null;
     const y = parseInt(parts[0], 10), m = parseInt(parts[1], 10);
-    if(isNaN(y) || isNaN(m)) return;
+    if(isNaN(y) || isNaN(m)) return null;
     const prevKey = m === 1 ? (y - 1) + '-12' : y + '-' + (m - 1);
-    let src = appData.months && appData.months[prevKey];
-    if(!src) {
-        // 上一个月不存在时，取已存在月份中离当前月最近的一个（处理跳月/跨年）
-        let bestKey = null, bestNum = -Infinity;
-        const curNum = y * 12 + (m - 1);
-        Object.keys(appData.months || {}).forEach(k => {
-            const p = String(k).split('-');
-            if(p.length !== 2) return;
-            const ky = parseInt(p[0], 10), km = parseInt(p[1], 10);
-            if(isNaN(ky) || isNaN(km)) return;
-            const num = ky * 12 + (km - 1);
-            if(num < curNum && num > bestNum) { bestNum = num; bestKey = k; }
-        });
-        src = bestKey ? appData.months[bestKey] : null;
-    }
+    if(appData.months && appData.months[prevKey]) return prevKey;
+    let bestKey = null, bestNum = -Infinity;
+    const curNum = y * 12 + (m - 1);
+    Object.keys(appData.months || {}).forEach(k => {
+        const p = String(k).split('-');
+        if(p.length !== 2) return;
+        const ky = parseInt(p[0], 10), km = parseInt(p[1], 10);
+        if(isNaN(ky) || isNaN(km)) return;
+        const num = ky * 12 + (km - 1);
+        if(num < curNum && num > bestNum) { bestNum = num; bestKey = k; }
+    });
+    return bestKey;
+}
+
+function inheritAccountsFromPrevMonth(key, md) {
+    if(!md) return;
+    const srcKey = findPrevMonthKey(key);
+    if(!srcKey) return;
+    const src = appData.months[srcKey];
     if(!src) return;
     if(Array.isArray(src.publicAccount) && src.publicAccount.length > 0) {
         md.publicAccount = JSON.parse(JSON.stringify(src.publicAccount));
@@ -1463,6 +1468,26 @@ function inheritAccountsFromPrevMonth(key, md) {
     if(Array.isArray(src.wechatAccount) && src.wechatAccount.length > 0) {
         md.wechatAccount = JSON.parse(JSON.stringify(src.wechatAccount));
     }
+}
+
+// 手动「从上月导入」：把最近一个过去月份的公户/微信结余复制到当前月份（覆盖本月现有结余数据）
+function inheritAccountsManual() {
+    if(isReadOnlyMode) { showToast('只读模式无法修改数据'); return; }
+    const key = getCurrentMonthKey();
+    const srcKey = findPrevMonthKey(key);
+    if(!srcKey) { showToast('没有找到更早的月份数据'); return; }
+    const src = appData.months[srcKey];
+    const hasData = (Array.isArray(src.publicAccount) && src.publicAccount.length) || (Array.isArray(src.wechatAccount) && src.wechatAccount.length);
+    if(!hasData) { showToast(srcKey + ' 没有结余数据可导入'); return; }
+    const srcLabel = srcKey.split('-')[0] + '年' + srcKey.split('-')[1] + '月';
+    const curLabel = key.split('-')[0] + '年' + (key.split('-')[1] || '') + '月';
+    if(!confirm('确定把「' + srcLabel + '」的公户/微信结余导入到「' + curLabel + '」吗？\n本月现有的公户/微信结余数据将被覆盖。')) return;
+    const md = getMonthData();
+    md.publicAccount = JSON.parse(JSON.stringify(src.publicAccount || []));
+    md.wechatAccount = JSON.parse(JSON.stringify(src.wechatAccount || []));
+    saveData();
+    renderContent();
+    showToast('已从「' + srcLabel + '」导入公户/微信结余数据');
 }
 
 function getMonthData() {
@@ -2303,7 +2328,12 @@ function renderDashboard(container) {
             <!-- Account Balance -->
             <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
                 <div class="bg-white rounded-xl border border-gray-200 p-5 shadow-sm">
-                    <h3 class="font-bold text-gray-800 mb-4"><i class="fas fa-university text-blue-600 mr-2"></i>公户结余</h3>
+                    <div class="flex items-center justify-between mb-4">
+                        <h3 class="font-bold text-gray-800"><i class="fas fa-university text-blue-600 mr-2"></i>公户结余</h3>
+                        <button onclick="inheritAccountsManual()" class="btn px-2.5 py-1 bg-amber-500 text-white rounded-lg text-xs hover:bg-amber-600" title="把最近一个过去月份的公户+微信结余复制到本月">
+                            <i class="fas fa-download mr-1"></i>从上月导入
+                        </button>
+                    </div>
                     <div class="overflow-x-auto">
                         <table class="w-full text-sm table-fixed data-table">
                             <thead><tr><th class="text-center" style="width:90px;">月份</th><th class="text-center">金额</th></tr></thead>
