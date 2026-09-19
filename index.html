@@ -2804,9 +2804,9 @@ function renderShadowDashboard(container) {
                 <div class="text-2xl font-bold text-blue-600">${fmt(shadow.grandTotal)}</div>
             </div>
             <div class="bg-white rounded-xl border-2 ${(shadowMd.adjustments && shadowMd.adjustments.total > 0) ? 'border-red-300' : 'border-gray-200'} p-5 shadow-sm">
-                <div class="text-xs text-gray-500 mb-1">合伙人分成（扣减后）</div>
+                <div class="text-xs text-gray-500 mb-1">副账增加金额（累计）</div>
                 <div class="text-2xl font-bold ${(shadowMd.adjustments && shadowMd.adjustments.total > 0) ? 'text-red-600' : 'text-gray-700'}">${fmt((shadowMd.adjustments && shadowMd.adjustments.total) || 0)}</div>
-                <div class="text-xs mt-1 text-gray-500">取送费/租金差额扣减后的剩余合伙人分成合计</div>
+                <div class="text-xs mt-1 text-gray-500">副账比主账多记的金额（分成差额 / 多记取送费租金 取大）</div>
             </div>
         </div>
 
