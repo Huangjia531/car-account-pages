@@ -4115,16 +4115,22 @@ function showImportDiagnosticsModal(platform) {
             }
             // 订单归属校验：对比 Excel 明细表原始车牌(若有)与系统匹配到的车牌，不一致即疑似错配
             if(d.plateCheck && d.plateCheck.length > 0) {
-                const mismatches = d.plateCheck.filter(c => (c.excelPlate && c.plate && normalizePlate(c.excelPlate) !== normalizePlate(c.plate)) || /可能撞车|流水日期|流水客人/.test(c.plateSource || ''));
                 const realMismatch = d.plateCheck.filter(c => c.excelPlate && c.plate && normalizePlate(c.excelPlate) !== normalizePlate(c.plate));
-                html += `<div class="mt-3 text-sm border rounded p-2 ${realMismatch.length ? 'border-red-300 bg-red-50' : 'border-green-200 bg-green-50'}">
-                    <div class="font-semibold ${realMismatch.length ? 'text-red-700' : 'text-green-700'} mb-1"><i class="fas fa-shield-alt mr-1"></i>订单归属校验（核对车牌是否挂对车）</div>
-                    <div class="text-xs text-gray-600 mb-2">${realMismatch.length ? '⚠️ 发现 <b>' + realMismatch.length + '</b> 笔疑似错配：订单被挂到别的车下，会导致该车实收/合伙人分成算错' : '✓ 全部订单的车牌与 Excel 明细表一致'}${d.ambiguousDates ? '；' + d.ambiguousDates + ' 组取还日期在多车间撞车，已按 Excel 明细表车牌列/订单号兜底' : ''}</div>
+                const low = d.plateCheck.filter(c => !realMismatch.includes(c) && /可能撞车|流水日期|流水客人/.test(c.plateSource || ''));
+                const untrusted = d.plateCheck.filter(c => c.trusted === false);
+                const needsReview = realMismatch.length + low.length + untrusted.length;
+                html += `<div class="mt-3 text-sm border rounded p-2 ${realMismatch.length ? 'border-red-300 bg-red-50' : (needsReview ? 'border-amber-200 bg-amber-50' : 'border-green-200 bg-green-50')}">
+                    <div class="font-semibold ${realMismatch.length ? 'text-red-700' : (needsReview ? 'text-amber-700' : 'text-green-700')} mb-1"><i class="fas fa-shield-alt mr-1"></i>订单归属校验（以车牌为首要依据核对车辆归属）</div>
+                    <div class="text-xs text-gray-600 mb-2">共 ${d.plateCheck.length} 笔：${realMismatch.length ? '<b>'+realMismatch.length+'</b> 笔 Excel 车牌与系统归属不符（错配）' : '✓ 无 Excel 车牌错配'}；${untrusted.length ? '<b>'+untrusted.length+'</b> 笔<b>未以车牌确认</b>（缺失车牌或仅靠日期/客人兜底，可能挂错车）' : '✓ 全部以车牌确认'}${low.length ? '；'+low.length+' 笔靠日期兜底（低可信）' : ''}。错配会让订单实收计入错误的车，导致合伙人分成算错，请逐笔复核。</div>
                     <div class="max-h-60 overflow-auto text-xs border rounded"><table class="w-full text-left"><thead class="bg-gray-100 sticky top-0"><tr><th class="px-2 py-1">订单号</th><th class="px-2 py-1">Excel车牌</th><th class="px-2 py-1">系统归属</th><th class="px-2 py-1">匹配来源</th><th class="px-2 py-1">状态</th></tr></thead><tbody>`;
                 d.plateCheck.forEach(c => {
                     const isBad = c.excelPlate && c.plate && normalizePlate(c.excelPlate) !== normalizePlate(c.plate);
-                    const isLow = !isBad && /可能撞车|流水日期|流水客人/.test(c.plateSource || '');
-                    html += `<tr class="${isBad ? 'bg-red-100' : (isLow ? 'bg-amber-50' : '')}"><td class="px-2 py-1 border-b">${c.orderNo || ''}</td><td class="px-2 py-1 border-b">${c.excelPlate || '—'}</td><td class="px-2 py-1 border-b">${c.plate || '—'}</td><td class="px-2 py-1 border-b">${c.plateSource || ''}</td><td class="px-2 py-1 border-b ${isBad ? 'text-red-600 font-semibold' : 'text-green-600'}">${isBad ? '疑似错配' : (isLow ? '低可信' : '一致')}</td></tr>`;
+                    const isUntrusted = c.trusted === false;
+                    const isLow = !isBad && !isUntrusted && /可能撞车|流水日期|流水客人/.test(c.plateSource || '');
+                    const cls = isBad ? 'bg-red-100' : (isUntrusted ? 'bg-orange-50' : (isLow ? 'bg-amber-50' : ''));
+                    const status = isBad ? '疑似错配' : (isUntrusted ? '未确认车牌' : (isLow ? '低可信' : '一致'));
+                    const statusCls = isBad ? 'text-red-600 font-semibold' : (isUntrusted ? 'text-orange-600 font-semibold' : (isLow ? 'text-amber-600' : 'text-green-600'));
+                    html += `<tr class="${cls}"><td class="px-2 py-1 border-b">${c.orderNo || ''}</td><td class="px-2 py-1 border-b">${c.excelPlate || '—'}</td><td class="px-2 py-1 border-b">${c.plate || '—'}</td><td class="px-2 py-1 border-b">${c.plateSource || ''}</td><td class="px-2 py-1 border-b ${statusCls}">${status}</td></tr>`;
                 });
                 html += `</tbody></table></div>`;
                 if(realMismatch.length && !isReadOnlyMode) {
@@ -4427,10 +4433,13 @@ function parsePlatformOrders(rows, platform, type, wRows) {
             const partsSum = colMap.pickupFeeParts.reduce((s, c) => s + num(row[c]), 0);
             if(partsSum > 0) pickupFee = Math.round(partsSum * 100) / 100;
         }
+        const normPlate = normalizePlate(plate);
         const order = {
-            plate: normalizePlate(plate),
-            plateSource: '明细表车牌列',
-            excelPlate: normalizePlate(plate),  // Excel 明细表自带车牌列，与 plate 一致（单表解析，可信）
+            plate: normPlate,
+            // 车牌列缺省（识别不到车牌列）时，标记为「未识别车牌-需人工确认」，绝不冒充已确认
+            plateSource: normPlate ? '明细表车牌列' : '未识别车牌-需人工确认',
+            plateTrusted: !!normPlate,
+            excelPlate: normPlate,
             orderNo: colMap.orderNo !== undefined ? str(row[colMap.orderNo]) : '',
             rentalFee: colMap.rentalFee !== undefined ? num(row[colMap.rentalFee]) : 0,
             pickupFee,
@@ -4539,8 +4548,8 @@ function parsePlatformOrders(rows, platform, type, wRows) {
             diagnostics.counts.positivePlatform++;
             if(diagnostics.positivePlatformRows.length < 50) diagnostics.positivePlatformRows.push(pfRow);
         }
-        // 订单归属校验：记录每笔订单的 Excel 原始车牌与匹配来源
-        diagnostics.plateCheck.push({orderNo: order.orderNo, plate: order.plate, excelPlate: order.excelPlate || '', plateSource: order.plateSource || '明细表车牌列'});
+        // 订单归属校验：记录每笔订单的 Excel 原始车牌与匹配来源及可信度
+        diagnostics.plateCheck.push({orderNo: order.orderNo, plate: order.plate, excelPlate: order.excelPlate || '', plateSource: order.plateSource || (order.plate ? '明细表车牌列' : '未识别车牌-需人工确认'), trusted: order.plateTrusted});
         // 记录所有解析出的订单行（含后续因无金额被跳过的），用于诊断明细核对
         if(diagnostics.allRows.length < 200) {
             const rawPfCol = colMap.platformFeeReceived !== undefined ? colMap.platformFeeReceived : colMap.platformFee;
@@ -4905,6 +4914,8 @@ function parseCtripOrders(orderRows, flowRows) {
         else if(orderNo && plateByOrderNo.has(orderNo)) { plate = plateByOrderNo.get(orderNo); plateSource = '流水订单号'; }
         else if(guest && key && plateByGuestDate.has(guest + '|' + key)) { plate = plateByGuestDate.get(guest + '|' + key); plateSource = '流水客人+日期'; }
         else if(plateByDate.has(key)) { plate = plateByDate.get(key); plateSource = '流水日期(可能撞车)'; }
+        // 车牌可信度：只有「明细表车牌列 / 流水订单号」是按车牌精确确认的；客人+日期、纯日期兜底都不可靠，必须人工复核
+        const plateTrusted = (plateSource === '明细表车牌列' || plateSource === '流水订单号');
 
         // 租期：优先按还车−取车自动算；若还车时间未识别，但表格自带租期列，则兜底使用表格租期
         const period = calcPeriod(pickupTime, returnTime) || rawPeriod || '';
@@ -4912,6 +4923,7 @@ function parseCtripOrders(orderRows, flowRows) {
         const order = {
             plate,
             plateSource,
+            plateTrusted,
             guestName: guest,
             orderNo,
             rentalFee,
@@ -4937,13 +4949,17 @@ function parseCtripOrders(orderRows, flowRows) {
         }
 
         orders.push(order);
+        // 订单归属校验：记录每笔订单的 Excel 原始车牌 / 匹配来源 / 是否按车牌确认，供导入诊断与事后校验核对
+        plateCheck.push({orderNo, plate, excelPlate: detailPlate, plateSource, guest, trusted: plateTrusted});
     }
 
     return {
         orders,
         plateMapSize: plateByOrderNo.size,
         ambiguousDates: ambiguousDates.size,
-        unmatchedKeys: orders.filter(o => !o.plate).length
+        unmatchedKeys: orders.filter(o => !o.plate).length,
+        plateCheck,
+        untrustedCount: orders.filter(o => !o.plateTrusted).length
     };
 }
 
@@ -5159,7 +5175,7 @@ function scanPlateMismatches() {
         const trusted = locs.find(l => l.o.excelPlate && normalizePlate(l.o.excelPlate) === l.plate);
         issues.push({platform: pf, orderNo, plate: locs.map(l => l.plate).join(' / '), excelPlate: locs[0].o.excelPlate || '', plateSource: locs[0].o.plateSource || '', type: 'dup', correctPlate: trusted ? trusted.plate : null});
     });
-    // 单笔：Excel 车牌与系统归属不符，或兜底低可信
+    // 单笔：Excel 车牌与系统归属不符，或兜底低可信，或未以车牌确认
     Object.entries(byOrder).forEach(([key, locs]) => {
         if(locs.length >= 2) return;
         const l = locs[0], o = l.o;
@@ -5167,6 +5183,8 @@ function scanPlateMismatches() {
             issues.push({platform: l.pf, orderNo: key.split('|')[1], plate: l.plate, excelPlate: normalizePlate(o.excelPlate), plateSource: o.plateSource || '', type: 'excel', correctPlate: normalizePlate(o.excelPlate)});
         } else if(/可能撞车|流水日期|流水客人/.test(o.plateSource || '')) {
             issues.push({platform: l.pf, orderNo: key.split('|')[1], plate: l.plate, excelPlate: (o.excelPlate || ''), plateSource: o.plateSource || '', type: 'low', correctPlate: null});
+        } else if(o.plateTrusted === false || /未识别车牌/.test(o.plateSource || '')) {
+            issues.push({platform: l.pf, orderNo: key.split('|')[1], plate: l.plate, excelPlate: (o.excelPlate || ''), plateSource: o.plateSource || '未识别车牌-需人工确认', type: 'untrusted', correctPlate: null});
         }
     });
     return issues;
@@ -5181,20 +5199,23 @@ function openPlateCheckModal() {
     const dupCount = issues.filter(i => i.type === 'dup').length;
     const excelCount = issues.filter(i => i.type === 'excel').length;
     const lowCount = issues.filter(i => i.type === 'low').length;
+    const untrustedCount = issues.filter(i => i.type === 'untrusted').length;
     const correctable = issues.filter(i => i.type === 'excel' || (i.type === 'dup' && i.correctPlate));
     let html = '';
     if(issues.length === 0) {
         html = '<div class="text-sm text-green-700 bg-green-50 border border-green-200 rounded p-3"><i class="fas fa-check-circle mr-1"></i>当前月份所有平台的订单归属均一致，未发现车辆错配。</div>';
     } else {
         html += `<div class="text-sm mb-3 ${excelCount || dupCount ? 'text-red-700 bg-red-50 border border-red-200' : 'text-amber-700 bg-amber-50 border border-amber-200'} rounded p-3">
-            共发现 <b>${issues.length}</b> 笔可疑：<b>${excelCount}</b> 笔 Excel 车牌与系统归属不符、<b>${dupCount}</b> 笔同一订单号出现在多辆车、<b>${lowCount}</b> 笔靠日期兜底匹配（可能错配）。<br>
-            <span class="text-xs text-gray-600">错配会让订单实收计入错误的车，导致该车租金/合伙人分成算错。请核对后点击「一键纠正」。</span>
+            共发现 <b>${issues.length}</b> 笔可疑：<b>${excelCount}</b> 笔 Excel 车牌与系统归属不符、<b>${dupCount}</b> 笔同一订单号出现在多辆车、<b>${lowCount}</b> 笔靠日期兜底匹配（低可信）、<b>${untrustedCount}</b> 笔未以车牌确认（缺失车牌或仅靠兜底，可能挂错车）。<br>
+            <span class="text-xs text-gray-600">错配会让订单实收计入错误的车，导致该车租金/合伙人分成算错。请核对后点击「一键纠正」；未确认车牌的订单需手动指定车辆。</span>
         </div>`;
         html += `<div class="max-h-[50vh] overflow-auto border rounded text-xs"><table class="w-full text-left"><thead class="bg-gray-100 sticky top-0"><tr><th class="px-2 py-1">平台</th><th class="px-2 py-1">订单号</th><th class="px-2 py-1">系统归属</th><th class="px-2 py-1">Excel车牌</th><th class="px-2 py-1">匹配来源</th><th class="px-2 py-1">类型</th><th class="px-2 py-1">建议</th></tr></thead><tbody>`;
         issues.forEach(i => {
-            const color = i.type === 'excel' ? 'bg-red-100' : (i.type === 'dup' ? 'bg-red-50' : 'bg-amber-50');
-            const suggest = i.type === 'excel' ? `迁回 ${i.correctPlate}` : (i.type === 'dup' ? (i.correctPlate ? `保留 ${i.correctPlate}，删其余` : '保留可信度最高') : '请核对 Excel');
-            html += `<tr class="${color}"><td class="px-2 py-1 border-b">${getPlatformName(i.platform)}</td><td class="px-2 py-1 border-b">${i.orderNo}</td><td class="px-2 py-1 border-b">${i.plate}</td><td class="px-2 py-1 border-b">${i.excelPlate || '—'}</td><td class="px-2 py-1 border-b">${i.plateSource || ''}</td><td class="px-2 py-1 border-b">${i.type === 'excel' ? '车牌不符' : (i.type === 'dup' ? '跨车重复' : '低可信')}</td><td class="px-2 py-1 border-b">${suggest}</td></tr>`;
+            const isUntrusted = i.type === 'untrusted';
+            const color = i.type === 'excel' ? 'bg-red-100' : (i.type === 'dup' ? 'bg-red-50' : (isUntrusted ? 'bg-orange-50' : 'bg-amber-50'));
+            const typeLabel = i.type === 'excel' ? '车牌不符' : (i.type === 'dup' ? '跨车重复' : (isUntrusted ? '未确认车牌' : '低可信'));
+            const suggest = i.type === 'excel' ? `迁回 ${i.correctPlate}` : (i.type === 'dup' ? (i.correctPlate ? `保留 ${i.correctPlate}，删其余` : '保留可信度最高') : (isUntrusted ? '请人工指定车辆' : '请核对 Excel'));
+            html += `<tr class="${color}"><td class="px-2 py-1 border-b">${getPlatformName(i.platform)}</td><td class="px-2 py-1 border-b">${i.orderNo}</td><td class="px-2 py-1 border-b">${i.plate}</td><td class="px-2 py-1 border-b">${i.excelPlate || '—'}</td><td class="px-2 py-1 border-b">${i.plateSource || ''}</td><td class="px-2 py-1 border-b">${typeLabel}</td><td class="px-2 py-1 border-b">${suggest}</td></tr>`;
         });
         html += `</tbody></table></div>`;
         if(correctable.length > 0 && !isReadOnlyMode) {
