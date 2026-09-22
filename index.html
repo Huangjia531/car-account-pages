@@ -3461,7 +3461,7 @@ function handlePlatformImportMulti(e, platform) {
     e.target.value = '';
     if(files.length === 0) return;
 
-    const agg = {parsed: 0, matched: 0, filled: 0, generated: 0, unmatched: [], files: 0, errors: [], fileStats: [], diagnostics: []};
+    const agg = {parsed: 0, matched: 0, filled: 0, generated: 0, unmatched: [], moved: [], files: 0, errors: [], fileStats: [], diagnostics: []};
     showPlatformResult(platform, 'multi', 'warning', `正在读取 ${getPlatformName(platform)} 的 ${files.length} 个文件…`, '请稍候');
 
     function readFile(idx) {
@@ -3476,10 +3476,15 @@ function handlePlatformImportMulti(e, platform) {
             const unmatchedSet = [...new Set(agg.unmatched)];
             const unmatchedTxt = unmatchedSet.length ? ' 未匹配车牌：' + unmatchedSet.join(', ') : '';
             const genTxt = agg.generated ? ` 自动新增 ${agg.generated} 辆车` : '';
+            const movedTxt = agg.moved.length
+                ? `<br><span style="color:#b45309">已纠正 ${agg.moved.length} 条订单的车辆归属：` +
+                  agg.moved.slice(0, 8).map(m => `${String(m.orderNo).slice(-6)} ${m.from}→${m.to}`).join('、') +
+                  (agg.moved.length > 8 ? ` 等${agg.moved.length}条` : '') + '</span>'
+                : '';
             const errorTxt = agg.errors.length ? ` ${agg.errors.length} 个文件解析失败。` : '';
             const perFileTxt = agg.fileStats.length ? '<br>按文件：' + agg.fileStats.map(s => {
                 let extra = s.empty ? ',未识别到数据' : '';
-                if(s.ctripInfo) extra += `,流水表车牌${s.ctripInfo.plateMapSize}条,未关联${s.ctripInfo.unmatched}条`;
+                if(s.ctripInfo) extra += `,订单号关联${s.ctripInfo.plateMapSize}条,未关联${s.ctripInfo.unmatched}条` + (s.ctripInfo.ambiguousDates ? `,日期撞车${s.ctripInfo.ambiguousDates}组` : '');
                 return `${s.name}(${s.parsed}条${extra})`;
             }).join('、') : '';
             // 保存最近一次导入诊断，供「查看导入诊断」弹窗使用
@@ -3489,13 +3494,13 @@ function handlePlatformImportMulti(e, platform) {
             } else if(unmatchedSet.length > 0) {
                 showPlatformResult(platform, 'multi', 'warning',
                     `${getPlatformName(platform)}结算清单导入完成，但有车辆未匹配！`,
-                    `共处理 ${agg.files}/${files.length} 个文件，解析 ${agg.parsed} 条订单，匹配 ${agg.matched} 辆车（其中自动新增 ${agg.generated} 辆），填入 ${agg.filled} 条订单明细。${unmatchedTxt}${errorTxt}${perFileTxt}`
+                    `共处理 ${agg.files}/${files.length} 个文件，解析 ${agg.parsed} 条订单，匹配 ${agg.matched} 辆车（其中自动新增 ${agg.generated} 辆），填入 ${agg.filled} 条订单明细。${unmatchedTxt}${errorTxt}${movedTxt}${perFileTxt}`
                 );
                 showUnmatchedAlert(unmatchedSet);
             } else {
                 showPlatformResult(platform, 'multi', 'success',
                     `${getPlatformName(platform)}结算清单导入完成！`,
-                    `共处理 ${agg.files}/${files.length} 个文件，解析 ${agg.parsed} 条订单，匹配 ${agg.matched} 辆车（其中自动新增 ${agg.generated} 辆），填入 ${agg.filled} 条订单明细。${genTxt}${errorTxt}${perFileTxt}`
+                    `共处理 ${agg.files}/${files.length} 个文件，解析 ${agg.parsed} 条订单，匹配 ${agg.matched} 辆车（其中自动新增 ${agg.generated} 辆），填入 ${agg.filled} 条订单明细。${genTxt}${errorTxt}${movedTxt}${perFileTxt}`
                 );
             }
             appendImportDiagnosticButton(platform);
@@ -3550,13 +3555,14 @@ function handlePlatformImportMulti(e, platform) {
                         agg.filled += fillResult.filled;
                         agg.generated += fillResult.generated;
                         agg.unmatched.push(...fillResult.unmatched);
+                        if(agg.moved) agg.moved.push(...(fillResult.moved || []));
                     }
                     // 把平台解析出的其他费用（如滴滴押金分账）追加到月度 otherExpenses 明细表
                     if(result.otherExpenses && result.otherExpenses.length > 0) {
                         mergePlatformOtherExpenses(result.otherExpenses);
                     }
                     agg.files++;
-                    agg.fileStats.push({name: file.name, parsed: result.orders.length, filled: fillResult.filled, ctripInfo: result.plateMapSize !== undefined ? {plateMapSize: result.plateMapSize, unmatched: result.unmatchedKeys || 0} : null, diagnostics: result.diagnostics});
+                    agg.fileStats.push({name: file.name, parsed: result.orders.length, filled: fillResult.filled, ctripInfo: result.plateMapSize !== undefined ? {plateMapSize: result.plateMapSize, unmatched: result.unmatchedKeys || 0, ambiguousDates: result.ambiguousDates || 0} : null, diagnostics: result.diagnostics});
                     if(result.diagnostics) agg.diagnostics.push({file: file.name, diagnostics: result.diagnostics});
                 } else {
                     agg.fileStats.push({name: file.name, parsed: 0, filled: 0, headerRow: result.headerRowIdx, empty: true, diagnostics: result.diagnostics});
@@ -3592,7 +3598,7 @@ function handleShadowImportMulti(e, platform) {
     if(files.length === 0) return;
     ensureShadowModel();
     const shadowMd = getShadowMonthData();
-    const agg = {parsed: 0, matched: 0, filled: 0, generated: 0, unmatched: [], files: 0, errors: []};
+    const agg = {parsed: 0, matched: 0, filled: 0, generated: 0, unmatched: [], moved: [], files: 0, errors: []};
     showToast('正在把 ' + getPlatformName(platform) + ' 结算清单导入副账套…');
 
     function readFile(idx) {
@@ -3610,7 +3616,8 @@ function handleShadowImportMulti(e, platform) {
             } else if(unmatchedSet.length > 0) {
                 showToast(getPlatformName(platform) + ' 导入副账套完成，但 ' + unmatchedTxt);
             } else {
-                showToast('已导入 ' + agg.filled + ' 条订单到副账套（' + getPlatformName(platform) + '）' + genTxt);
+                const shadowMovedTxt = agg.moved && agg.moved.length ? '，纠正归属 ' + agg.moved.length + ' 条' : '';
+                showToast('已导入 ' + agg.filled + ' 条订单到副账套（' + getPlatformName(platform) + '）' + genTxt + shadowMovedTxt);
             }
             return;
         }
@@ -3651,6 +3658,7 @@ function handleShadowImportMulti(e, platform) {
                         agg.filled += fillResult.filled;
                         agg.generated += fillResult.generated;
                         agg.unmatched.push(...fillResult.unmatched);
+                        if(agg.moved) agg.moved.push(...(fillResult.moved || []));
                     }
                     if(result.otherExpenses && result.otherExpenses.length > 0) {
                         mergePlatformOtherExpenses(result.otherExpenses, shadowMd);
@@ -4769,11 +4777,22 @@ function parsePlatformOrdersPositional(rows, platform) {
 // 用「资源名称 + 客人姓名 + 取车日期 + 还车日期」关联，把车牌补到订单上。
 function parseCtripOrders(orderRows, flowRows) {
     const orders = [];
-    const plateMap = new Map();
+    // 车牌索引分三级，按准确度从高到低取用：
+    //   ① 订单明细表自带的「车牌」列（最准，用户维护）
+    //   ② 流水表按「携程订单号」精确关联（100% 唯一）
+    //   ③ 流水表按「客人姓名 + 取还车日期」关联
+    //   ④ 流水表仅按「取还车日期」关联（多车同取还日期会撞车，仅作兜底）
+    // 旧版只用 ④，导致不同车辆取还日期相同时全部被挂到第一辆车上。
+    const plateByOrderNo = new Map();
+    const plateByGuestDate = new Map();
+    const plateByDate = new Map();
+    const ambiguousDates = new Set();
 
-    // 1. 解析流水表：只取「车牌 + 取车日期 + 还车日期」
+    // 1. 解析流水表：车牌 + 订单号 + 客人 + 取还车日期
     const flowHeaders = {
+        orderNo: ['携程订单号', '携程单号', '商家订单号', '供应单号', '订单号', '订单编号', '单号'],
         plate: ['车牌号', '车牌'],
+        guest: ['客人姓名', '客户姓名', '承租人', '客人'],
         pickupTime: ['取车时间', '取车日期时间', '开始时间', '开始用车时间', '取车日期'],
         returnTime: ['还车时间', '还车日期时间', '结束时间', '结束用车时间', '还车日期', '返程时间', '返程日期']
     };
@@ -4787,10 +4806,21 @@ function parseCtripOrders(orderRows, flowRows) {
             if(allText.includes('合计') || allText.includes('总计') || allText.includes('小计')) continue;
             const plate = fColMap.plate !== undefined ? str(row[fColMap.plate]) : findPlateInRow(row);
             if(!plate) continue;
+            const np = normalizePlate(plate);
+            const fOrderNo = fColMap.orderNo !== undefined ? str(row[fColMap.orderNo]) : '';
+            const fGuest = fColMap.guest !== undefined ? str(row[fColMap.guest]).replace(/[,，\s]/g, '') : '';
             const pickupTime = fColMap.pickupTime !== undefined ? formatDateCell(row[fColMap.pickupTime]) : '';
             const returnTime = fColMap.returnTime !== undefined ? formatDateCell(row[fColMap.returnTime]) : '';
+            // ② 订单号精确关联（同一订单在流水里多行，车牌一致，先到即可）
+            if(fOrderNo && !plateByOrderNo.has(fOrderNo)) plateByOrderNo.set(fOrderNo, np);
             const key = makeCtripMatchKey(pickupTime, returnTime);
-            if(key && !plateMap.has(key)) plateMap.set(key, normalizePlate(plate));
+            if(key) {
+                // ④ 日期兜底：同一日期出现不同车牌 → 标记歧义，说明该日期不可靠
+                if(plateByDate.has(key) && plateByDate.get(key) !== np) ambiguousDates.add(key);
+                else if(!plateByDate.has(key)) plateByDate.set(key, np);
+                // ③ 客人 + 日期
+                if(fGuest && !plateByGuestDate.has(fGuest + '|' + key)) plateByGuestDate.set(fGuest + '|' + key, np);
+            }
         }
     }
 
@@ -4799,13 +4829,15 @@ function parseCtripOrders(orderRows, flowRows) {
         orderNo: ['携程订单号', '携程单号', '商家订单号', '供应单号', '订单号', '订单编号', '订单编码', '交易单号', '单号'],
         pickupTime: ['出发时间', '取车时间', '取车日期时间', '开始时间', '开始用车时间', '取车日期'],
         returnTime: ['返程时间', '返程日期', '还车时间', '还车日期时间', '结束时间', '结束用车时间', '还车日期'],
+        plate: ['车牌', '车牌号'],
+        guest: ['客人姓名', '客户姓名', '承租人', '客人'],
         rentalFee: ['订单金额', '订单总额', '订单合计', '订单总金额', '租金', '车辆租金', '日租金合计', '租赁收入', '订单收益', '商品金额', '应付金额', '车辆费用', '总费用'],
         pickupFee: ['取送费', '送车费', '取车费', '还车费', '配送费', '取车服务费', '还车服务费'],
         actualIncome: ['结算金额', '结算价金额', '商家结算金额', '结算总额', '实收金额', '实收', '到账', '结算收入', '商家收入', '实际收入'],
         period: ['租期', '天数', '时长', '租赁天数']
     };
     const orderHeaderRowIdx = findHeaderRow(orderRows, orderHeaders);
-    if(orderHeaderRowIdx < 0) return {orders, plateMapSize: plateMap.size};
+    if(orderHeaderRowIdx < 0) return {orders, plateMapSize: plateByOrderNo.size, ambiguousDates: ambiguousDates.size, unmatchedKeys: 0};
     const oColMap = buildColMap(orderRows[orderHeaderRowIdx], orderHeaders);
 
     // 兜底：表头未识别到订单号列时，按数据特征自动探测（订单号通常是 6-32 位、以数字为主、不含中文/货币/纯小数金额/日期）
@@ -4831,13 +4863,23 @@ function parseCtripOrders(orderRows, flowRows) {
         if(!orderNo && rentalFee <= 0 && rawActualIncome <= 0) continue;
 
         const key = makeCtripMatchKey(pickupTime, returnTime);
-        const plate = plateMap.get(key) || '';
+        // 车牌解析优先级：明细表自带车牌列 > 流水订单号 > 流水客人+日期 > 流水日期（可能歧义）
+        const detailPlate = oColMap.plate !== undefined ? normalizePlate(str(row[oColMap.plate])) : '';
+        const guest = oColMap.guest !== undefined ? str(row[oColMap.guest]).replace(/[,，\s]/g, '') : '';
+        let plate = '';
+        let plateSource = '';
+        if(detailPlate) { plate = detailPlate; plateSource = '明细表车牌列'; }
+        else if(orderNo && plateByOrderNo.has(orderNo)) { plate = plateByOrderNo.get(orderNo); plateSource = '流水订单号'; }
+        else if(guest && key && plateByGuestDate.has(guest + '|' + key)) { plate = plateByGuestDate.get(guest + '|' + key); plateSource = '流水客人+日期'; }
+        else if(plateByDate.has(key)) { plate = plateByDate.get(key); plateSource = '流水日期(可能撞车)'; }
 
         // 租期：优先按还车−取车自动算；若还车时间未识别，但表格自带租期列，则兜底使用表格租期
         const period = calcPeriod(pickupTime, returnTime) || rawPeriod || '';
 
         const order = {
             plate,
+            plateSource,
+            guestName: guest,
             orderNo,
             rentalFee,
             pickupFee,
@@ -4864,7 +4906,12 @@ function parseCtripOrders(orderRows, flowRows) {
         orders.push(order);
     }
 
-    return {orders, plateMapSize: plateMap.size, unmatchedKeys: orders.filter(o => !o.plate).length};
+    return {
+        orders,
+        plateMapSize: plateByOrderNo.size,
+        ambiguousDates: ambiguousDates.size,
+        unmatchedKeys: orders.filter(o => !o.plate).length
+    };
 }
 
 function findHeaderRow(rows, headers) {
@@ -4975,12 +5022,43 @@ function normalizePlate(plate) {
 }
 
 // ==================== Auto-fill Platform Orders to Vehicles ====================
+// 在整月数据里按订单号定位一条订单（返回 {plate, idx}），用于纠正挂错车辆的订单
+function findOrderLocation(md, platform, orderNo) {
+    if(!orderNo) return null;
+    const vehicles = md.vehicles || {};
+    const plates = Object.keys(vehicles);
+    for(let i = 0; i < plates.length; i++) {
+        const arr = (vehicles[plates[i]].orders && vehicles[plates[i]].orders[platform]) || [];
+        for(let j = 0; j < arr.length; j++) {
+            if(arr[j] && String(arr[j].no) === String(orderNo)) return {plate: plates[i], idx: j};
+        }
+    }
+    return null;
+}
+
+// 重算某车某平台的汇总（实收/取送费/其他费用），并保证总取送费 = 各平台取送费之和（幂等）
+function recalcVehiclePlatformSummary(vd, platform) {
+    if(!vd) return;
+    const sum = sumOrders(vd.orders[platform] || []);
+    vd.summary[platform] = Math.round(sum.actualIncome * 100) / 100;
+    vd.summary[platform + 'Pf'] = Math.round(sum.pickupFee * 100) / 100;
+    vd.summary[platform + 'Other'] = Math.round(sum.otherFee * 100) / 100;
+    vd.summary.pickupFee = Math.round((
+        (vd.summary.didiPf || 0) + (vd.summary.helloPf || 0) +
+        (vd.summary.ctripPf || 0) + (vd.summary.wukongPf || 0)
+    ) * 100) / 100;
+    vd.summary.rentalIncome = (vd.summary.didi || 0) + (vd.summary.hello || 0) + (vd.summary.ctrip || 0) + (vd.summary.wukong || 0);
+    vd.summary.totalIncome = vd.summary.rentalIncome + vd.summary.pickupFee;
+}
+
 function fillPlatformOrdersToVehicles(orders, platform, targetMd) {
     const md = targetMd || getMonthData();
     let matched = 0;
     let filled = 0;
     const unmatched = [];
     let generated = 0;
+    // 因车牌关联修正而改挂车辆的订单（导入诊断/结果里会提示）
+    const moved = [];
 
     // Group orders by plate
     const ordersByPlate = {};
@@ -5027,6 +5105,23 @@ function fillPlatformOrdersToVehicles(orders, platform, targetMd) {
             );
             if(exists) return;
 
+            // 订单号已存在但挂在别的车下：说明之前车牌关联有误，迁移到正确车辆
+            const prevLoc = order.orderNo ? findOrderLocation(md, platform, order.orderNo) : null;
+            if(prevLoc && prevLoc.plate !== matchedPlate) {
+                const srcVd = md.vehicles[prevLoc.plate];
+                const srcArr = srcVd.orders[platform] || [];
+                const removed = srcArr[prevLoc.idx] || {};
+                srcArr.splice(prevLoc.idx, 1);
+                while(srcArr.length < DEFAULT_ORDER_ROWS) srcArr.push(createEmptyOrder());
+                recalcVehiclePlatformSummary(srcVd, platform);
+                moved.push({
+                    orderNo: order.orderNo,
+                    from: prevLoc.plate,
+                    to: matchedPlate,
+                    rentalFee: removed.rentalFee || 0
+                });
+            }
+
             // Find first empty slot
             let slotIdx = existingOrders.findIndex(o => !o.no && !o.rentalFee && !o.actualIncome);
             if(slotIdx === -1) {
@@ -5054,16 +5149,10 @@ function fillPlatformOrdersToVehicles(orders, platform, targetMd) {
         });
 
         // Update vehicle summary for this platform
-        const sum = sumOrders(vd.orders[platform]);
-        vd.summary[platform] = Math.round(sum.actualIncome * 100) / 100;
-        vd.summary[platform + 'Pf'] = Math.round(sum.pickupFee * 100) / 100;
-        vd.summary[platform + 'Other'] = Math.round(sum.otherFee * 100) / 100;
-        vd.summary.pickupFee = Math.round((vd.summary.pickupFee + sum.pickupFee) * 100) / 100;
-        vd.summary.rentalIncome = (vd.summary.didi || 0) + (vd.summary.hello || 0) + (vd.summary.ctrip || 0) + (vd.summary.wukong || 0);
-        vd.summary.totalIncome = vd.summary.rentalIncome + vd.summary.pickupFee;
+        recalcVehiclePlatformSummary(vd, platform);
     });
 
-    return {matched, filled, unmatched, generated};
+    return {matched, filled, unmatched, generated, moved};
 }
 
 // Find matching plate from PLATES list (exact match only)
