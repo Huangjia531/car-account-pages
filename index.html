@@ -3499,18 +3499,19 @@ function handlePlatformImportMulti(e, platform) {
             // 保存最近一次导入诊断，供「查看导入诊断」弹窗使用
             window.lastImportDiagnostics = {platform, diagnostics: agg.diagnostics, fileStats: agg.fileStats};
             const feeNote = agg.feeCount ? `；自动抓取电费/车损/罚金/违章 ${agg.feeCount} 笔，写入其他费用（正数记录），仅「费用实际日期＝当前月份」的流水/备注费用会扣减各车实收，跨月费用只记录不扣减` : '';
+            const npNote = agg.noPlate ? `；无车牌订单 ${agg.noPlate} 笔已转入其他费用（可补填车牌）` : '';
             if(agg.parsed === 0) {
                 showPlatformResult(platform, 'multi', 'warning', '未找到有效订单数据', '请确认文件是从' + getPlatformName(platform) + '平台导出的结算清单。');
             } else if(unmatchedSet.length > 0) {
                 showPlatformResult(platform, 'multi', 'warning',
                     `${getPlatformName(platform)}结算清单导入完成，但有车辆未匹配！`,
-                    `共处理 ${agg.files}/${files.length} 个文件，解析 ${agg.parsed} 条订单，匹配 ${agg.matched} 辆车（其中自动新增 ${agg.generated} 辆），填入 ${agg.filled} 条订单明细。${unmatchedTxt}${errorTxt}${movedTxt}${perFileTxt}${feeNote}`
+                    `共处理 ${agg.files}/${files.length} 个文件，解析 ${agg.parsed} 条订单，匹配 ${agg.matched} 辆车（其中自动新增 ${agg.generated} 辆），填入 ${agg.filled} 条订单明细。${unmatchedTxt}${errorTxt}${movedTxt}${perFileTxt}${feeNote}${npNote}`
                 );
                 showUnmatchedAlert(unmatchedSet);
             } else {
                 showPlatformResult(platform, 'multi', 'success',
                     `${getPlatformName(platform)}结算清单导入完成！`,
-                    `共处理 ${agg.files}/${files.length} 个文件，解析 ${agg.parsed} 条订单，匹配 ${agg.matched} 辆车（其中自动新增 ${agg.generated} 辆），填入 ${agg.filled} 条订单明细。${genTxt}${errorTxt}${movedTxt}${perFileTxt}${feeNote}`
+                    `共处理 ${agg.files}/${files.length} 个文件，解析 ${agg.parsed} 条订单，匹配 ${agg.matched} 辆车（其中自动新增 ${agg.generated} 辆），填入 ${agg.filled} 条订单明细。${genTxt}${errorTxt}${movedTxt}${perFileTxt}${feeNote}${npNote}`
                 );
             }
             appendImportDiagnosticButton(platform);
@@ -3548,7 +3549,12 @@ function handlePlatformImportMulti(e, platform) {
                 } else if(platform === 'wukong') {
                     // 悟空：优先按对账单规则解析 Sheet1（订单总计/平台费/取送费/返款金额，实收=返款金额−取送费）
                     result = parseWukongStatement(workbook);
-                    if(!result.orders.length) result = parseBestPlatformSheet(workbook, platform);
+                    if(!result.orders.length) {
+                        // 回退前保留已识别的「无车牌订单转入」条目，避免被通用解析结果覆盖
+                        const wkOther = result.otherExpenses || [];
+                        result = parseBestPlatformSheet(workbook, platform);
+                        result.otherExpenses = (result.otherExpenses || []).concat(wkOther);
+                    }
                 } else {
                     // 其他平台（滴滴/哈啰）：多工作表文件很常见，不能简单合并所有行。
                     // 合并后不同工作表的列位置不同，会导致表头识别错误、订单解析为0。
@@ -3581,6 +3587,9 @@ function handlePlatformImportMulti(e, platform) {
                     if(result.otherExpenses && result.otherExpenses.length > 0) {
                         mergePlatformOtherExpenses(result.otherExpenses);
                     }
+                    // 统计「无车牌订单转入」条数，用于导入结果提示
+                    const npCount = (result.diagnostics && result.diagnostics.counts && result.diagnostics.counts.noPlateToOther) || 0;
+                    if(npCount) agg.noPlate = (agg.noPlate || 0) + npCount;
                     // 携程跨表关联：把订单归属校验数据(plateCheck)包装成 diagnostics 保存，供「导入诊断」展示
                     if(platform === 'ctrip' && result.plateCheck) {
                         result.diagnostics = {headers: {}, totals: {}, counts: {}, plateCheck: result.plateCheck, ambiguousDates: result.ambiguousDates || 0, unmatchedKeys: result.unmatchedKeys || 0};
@@ -3873,6 +3882,7 @@ function parseWukongStatement(workbook) {
     });
 
     const orders = [];
+    const otherExpenses = [];
     for(let i = headerRowIdx + 1; i < rows.length; i++) {
         const row = (wRows && wRows[i]) ? wRows[i] : rows[i];
         if(!row || row.length === 0) continue;
@@ -3886,6 +3896,22 @@ function parseWukongStatement(workbook) {
         }
         const plate = colMap.plate !== undefined ? str(row[colMap.plate]) : findPlateInRow(row);
         if(!plate) {
+            // 无车牌但有单号、有金额的订单行 → 不丢弃，转入「其他费用」（正数收入，不挂任何车辆）
+            const noPlateNo = colMap.orderNo !== undefined ? str(row[colMap.orderNo]) : '';
+            if(noPlateNo) {
+                const nRF = colMap.rentalFee !== undefined ? num(row[colMap.rentalFee]) : 0;
+                const nPF = colMap.pickupFee !== undefined ? num(row[colMap.pickupFee]) : 0;
+                const nRefund = colMap.refundFee !== undefined ? num(row[colMap.refundFee]) : 0;
+                const amt = Math.round((nRefund > 0 ? nRefund - nPF : nRF) * 100) / 100;
+                if(Math.abs(amt) > 0.005) {
+                    otherExpenses.push({
+                        platform: 'wukong', orderNo: noPlateNo, plate: '',
+                        amount: amt, fee: 0, actualIncome: amt,
+                        feeType: '无车牌订单', remark: '无车牌订单转入'
+                    });
+                    diagnostics.counts.noPlateToOther = (diagnostics.counts.noPlateToOther || 0) + 1;
+                }
+            }
             diagnostics.counts.skipped++;
             if(diagnostics.skippedRows.length < 20) diagnostics.skippedRows.push({idx:i, reason:'无车牌', preview:row.slice(0,8).map(c=>String(c||'')).join(' | ')});
             continue;
@@ -3951,7 +3977,7 @@ function parseWukongStatement(workbook) {
     }
     for(const k in diagnostics.totals) diagnostics.totals[k] = Math.round(diagnostics.totals[k] * 100) / 100;
     diagnostics.sheetCandidates[0].ordersCount = orders.length;
-    return {orders, otherExpenses: [], colMap, headerRowIdx, diagnostics};
+    return {orders, otherExpenses, colMap, headerRowIdx, diagnostics};
 }
 
 // 单元格级探测：读取每个关键字段单元格的 raw(v)、显示(w)、公式(f)，用于定位显示/缓存不一致
@@ -4429,6 +4455,29 @@ function parsePlatformOrders(rows, platform, type, wRows) {
 
         const plate = colMap.plate !== undefined ? str(row[colMap.plate]) : findPlateInRow(row);
         if(!plate) {
+            // 无车牌但有单号、有金额的订单行 → 不丢弃，转入「其他费用」（正数收入，不挂任何车辆）
+            const noPlateNo = colMap.orderNo !== undefined ? str(row[colMap.orderNo]) : '';
+            const npAllText = row.map(c => String(c || '')).join('');
+            if(noPlateNo && !/合计|总计|小计/.test(npAllText) && !/合计|总计|小计/.test(noPlateNo)) {
+                const nRF = colMap.rentalFee !== undefined ? num(row[colMap.rentalFee]) : 0;
+                const nPick = colMap.pickupFee !== undefined ? num(row[colMap.pickupFee]) : 0;
+                const nPltF = colMap.platformFee !== undefined ? num(row[colMap.platformFee]) : 0;
+                const nAI = colMap.actualIncome !== undefined ? num(row[colMap.actualIncome]) : 0;
+                const nRefund = colMap.refundFee !== undefined ? num(row[colMap.refundFee]) : 0;
+                let amt = 0;
+                if(nAI > 0) amt = nAI;                                          // 优先「结算金额/实收金额」列
+                else if(nRefund > 0) amt = Math.round((nRefund - nPick) * 100) / 100;  // 返款金额 − 取送费
+                else if(platform === 'wukong' || platform === 'didi') amt = Math.round((nRF - nPltF - nPick) * 100) / 100;
+                else if(nRF > 0) amt = Math.round((nRF * 0.85 - nPick) * 100) / 100;
+                if(Math.abs(amt) > 0.005) {
+                    otherExpenses.push({
+                        platform, orderNo: noPlateNo, plate: '',
+                        amount: amt, fee: 0, actualIncome: amt,
+                        feeType: '无车牌订单', remark: '无车牌订单转入'
+                    });
+                    diagnostics.counts.noPlateToOther = (diagnostics.counts.noPlateToOther || 0) + 1;
+                }
+            }
             diagnostics.counts.skipped++;
             if(diagnostics.skippedRows.length < 20) diagnostics.skippedRows.push({idx:i, reason:'无车牌', preview:row.slice(0,8).map(c=>String(c||'')).join(' | ')});
             continue;
