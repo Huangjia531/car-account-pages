@@ -2558,7 +2558,7 @@ function renderOther(container) {
                                 <td class="text-center"><input class="table-input w-full" value="${exp.amount}" onchange="updateOtherExpense(${i},'amount',this.value)" type="number" step="0.01"></td>
                                 <td class="text-center"><input class="table-input w-full" value="${exp.fee}" onchange="updateOtherExpense(${i},'fee',this.value)" type="number" step="0.01"></td>
                                 <td class="text-center"><input class="table-input w-full" value="${exp.actualIncome}" onchange="updateOtherExpense(${i},'actualIncome',this.value)" type="number" step="0.01"></td>
-                                <td class="text-center"><span class="inline-block px-1.5 py-0.5 rounded text-xs ${exp.feeType ? 'bg-rose-100 text-rose-700' : 'bg-gray-100 text-gray-500'}">${exp.feeType || '其他'}</span>${exp.feeSource === 'flowRemark' ? '<span class="ml-1 text-xs text-orange-600">↓实收</span>' : (exp.feeSource === 'orderDetail' ? '<span class="ml-1 text-xs text-gray-400">含结算</span>' : '')}</td>
+                                <td class="text-center"><span class="inline-block px-1.5 py-0.5 rounded text-xs ${exp.feeType ? 'bg-rose-100 text-rose-700' : 'bg-gray-100 text-gray-500'}">${exp.feeType || '其他'}</span>${exp.feeSource === 'flowRemark' ? (exp.feeMonth && exp.feeMonth === getCurrentMonthKey() ? '<span class="ml-1 text-xs text-orange-600">↓实收</span>' : '<span class="ml-1 text-xs text-gray-400">仅记录</span>') : (exp.feeSource === 'orderDetail' ? '<span class="ml-1 text-xs text-gray-400">含结算</span>' : '')}</td>
                                 <td class="text-center"><input class="table-input w-full" value="${exp.plate || ''}" onchange="updateOtherExpense(${i},'plate',this.value)" placeholder="车牌"></td>
                                 <td class="text-center"><input class="table-input w-full" value="${exp.remark}" onchange="updateOtherExpense(${i},'remark',this.value)"></td>
                                 <td class="text-center"><button onclick="deleteOtherExpense(${i})" class="text-red-500 hover:text-red-700 transition"><i class="fas fa-trash"></i></button></td>
@@ -3498,7 +3498,7 @@ function handlePlatformImportMulti(e, platform) {
             }).join('、') : '';
             // 保存最近一次导入诊断，供「查看导入诊断」弹窗使用
             window.lastImportDiagnostics = {platform, diagnostics: agg.diagnostics, fileStats: agg.fileStats};
-            const feeNote = agg.feeCount ? `；自动抓取电费/车损/罚金/违章 ${agg.feeCount} 笔，写入其他费用（正数记录），其中「流水/备注」来源的已在各车实收中扣除，记在当月` : '';
+            const feeNote = agg.feeCount ? `；自动抓取电费/车损/罚金/违章 ${agg.feeCount} 笔，写入其他费用（正数记录），仅「费用实际日期＝当前月份」的流水/备注费用会扣减各车实收，跨月费用只记录不扣减` : '';
             if(agg.parsed === 0) {
                 showPlatformResult(platform, 'multi', 'warning', '未找到有效订单数据', '请确认文件是从' + getPlatformName(platform) + '平台导出的结算清单。');
             } else if(unmatchedSet.length > 0) {
@@ -5965,6 +5965,31 @@ function resolvePlateByOrderNo(orderNo) {
     return '';
 }
 
+// 从单元格文本解析「年-月」（月份不带前导零，与 monthSelect.value 保持一致，如 "2026-6"）
+// 支持：2026-06-26 / 2026/6/26 / 2026.6.26 / 2026年6月26日 / 2026-06-26 10:00:00 / 6月
+function parseYM(str) {
+    if(!str) return '';
+    const s = String(str).trim();
+    let m = s.match(/(\d{4})\s*[-/年.]\s*(\d{1,2})/);
+    if(m) {
+        const y = parseInt(m[1], 10), mo = parseInt(m[2], 10);
+        if(y >= 2000 && mo >= 1 && mo <= 12) return y + '-' + mo;
+    }
+    m = s.match(/(\d{1,2})\s*月/);
+    if(m) {
+        const mo = parseInt(m[1], 10);
+        if(mo >= 1 && mo <= 12) return (appData.currentYear || new Date().getFullYear()) + '-' + mo;
+    }
+    return '';
+}
+
+// 当前选中月份的 key（与 months 存储 key 一致，如 "2026-6"）
+function getCurrentMonthKey() {
+    const y = appData.currentYear;
+    const mo = (typeof document !== 'undefined' && document.getElementById('monthSelect')) ? document.getElementById('monthSelect').value : '';
+    return y + '-' + mo;
+}
+
 // sheets: [{name, rows:[[]]}]  -> 其他费用明细条目数组
 // 两种抓取方式：
 // ① 表头即费用列（如「实扣车损」「违章押金」列）→ 取该列数值；
@@ -5979,7 +6004,7 @@ function scanFeeColumns(sheets, platform) {
         const hdrIdx = findFeeHeaderRow(rows);
         if(hdrIdx < 0) return;
         const hdr = (rows[hdrIdx] || []).map(c => String(c).trim());
-        let orderNoCol = -1, orderNoPri = 99, plateCol = -1;
+        let orderNoCol = -1, orderNoPri = 99, plateCol = -1, dateCol = -1;
         const feeCols = [];
         const valCols = [];   // 费用类型可能作为「值」出现的列（流水类型/备注等）
         const amtCols = [];   // 行内候选金额列 {col, pri}
@@ -5988,6 +6013,7 @@ function scanFeeColumns(sheets, platform) {
             const onoPri = /订单号|订单编号|订单ID|携程订单号/.test(h) ? 0 : (/第三方单号/.test(h) ? 1 : ((/单号|订单/.test(h)) ? 2 : 99));
             if(onoPri < orderNoPri) { orderNoPri = onoPri; orderNoCol = i; }
             if(plateCol < 0 && /车牌|车牌号|车牌照/.test(h)) plateCol = i;
+            if(dateCol < 0 && /日期|时间|账期|结算日期|交易日期|流水日期|下单日期|订单日期|取还车日期|取车日期|还车日期|创建时间|记账日期/.test(h)) dateCol = i;
             for(const ft of Object.keys(FEE_KEYWORDS)) {
                 if(FEE_KEYWORDS[ft].some(k => h.includes(k)) && !/退款|退|返还|退还/.test(h)) {
                     feeCols.push({col: i, feeType: ft, header: h});
@@ -6008,6 +6034,8 @@ function scanFeeColumns(sheets, platform) {
                 if(!plate && orderNo) plate = resolvePlateByOrderNo(orderNo);
                 return { plate, orderNo };
             };
+            // 费用实际所属月份：从行内日期列解析（没有日期列则为空，空表示无法判定→不减实收）
+            const feeMonth = dateCol >= 0 ? parseYM(row[dateCol]) : '';
             // ① 表头即费用列：直接取该列数值
             feeCols.forEach(fc => {
                 const raw = String(row[fc.col] || '').replace(/[^\d.\-]/g, '');
@@ -6015,7 +6043,7 @@ function scanFeeColumns(sheets, platform) {
                 if(!(val > 0)) return; // 只抓正数
                 const {plate, orderNo} = grabCommon();
                 const amount = Math.round(val * 100) / 100; // 正数记录；订单明细来源不减实收
-                out.push({platform, orderNo, plate, amount, fee: 0, actualIncome: amount, feeType: fc.feeType, feeSource: 'orderDetail', remark: `自动抓取-${fc.feeType}-${fc.header}`});
+                out.push({platform, orderNo, plate, amount, fee: 0, actualIncome: amount, feeType: fc.feeType, feeSource: 'orderDetail', feeMonth, remark: `自动抓取-${fc.feeType}-${fc.header}`});
             });
             // ② 费用类型是单元格值（仅当本表没有表头费用列时启用，避免同表重复）
             if(feeCols.length === 0 && valCols.length) {
@@ -6040,15 +6068,15 @@ function scanFeeColumns(sheets, platform) {
                 });
                 if(!(val > 0)) continue; // 只抓正数
                 const {plate, orderNo} = grabCommon();
-                const amount = Math.round(val * 100) / 100; // 正数记录；流水备注来源需减实收
-                out.push({platform, orderNo, plate, amount, fee: 0, actualIncome: amount, feeType: hitType, feeSource: 'flowRemark', remark: `自动抓取-${hitType}-${hitVal}`});
+                const amount = Math.round(val * 100) / 100; // 正数记录；流水备注来源「当月」才减实收
+                out.push({platform, orderNo, plate, amount, fee: 0, actualIncome: amount, feeType: hitType, feeSource: 'flowRemark', feeMonth, remark: `自动抓取-${hitType}-${hitVal}`});
             }
         }
     });
     // 去重：平台+订单号+金额+类型+来源（防止多表/多列同时命中同一笔）
     const seen = new Set();
     return out.filter(e => {
-        const key = `${e.platform}|${e.orderNo}|${e.amount}|${e.feeType}|${e.feeSource}`;
+        const key = `${e.platform}|${e.orderNo}|${e.amount}|${e.feeType}|${e.feeSource}|${e.feeMonth || ''}`;
         if(seen.has(key)) return false;
         seen.add(key);
         return true;
@@ -6057,13 +6085,15 @@ function scanFeeColumns(sheets, platform) {
 
 // 自动抓取的「流水/备注」来源费用（电费/车损/罚金/违章）= 成本，从车辆实收里减去。
 // 「订单明细」来源的费用已含在结算内，不减实收（返回 0）。
+// 仅当费用实际所属月份 = 当前查看月份时才减实收；跨月费用（如 6 月罚金在 8 月查看）只记录、不减实收。
 function vehicleFeeDeduction(plate, platform) {
     const md = getMonthData();
     if(!md || !md.otherExpenses) return 0;
+    const curKey = getCurrentMonthKey();
     let d = 0;
     md.otherExpenses.forEach(e => {
         if(e.feeSource === 'flowRemark' && (e.platform || '') === platform && normalizePlate(e.plate || '') === normalizePlate(plate || '')) {
-            d += (parseFloat(e.amount) || 0);
+            if(e.feeMonth && e.feeMonth === curKey) d += (parseFloat(e.amount) || 0);
         }
     });
     return d;
