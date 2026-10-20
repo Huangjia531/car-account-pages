@@ -5958,20 +5958,37 @@ function deleteOtherExpense(idx) {
 function mergePlatformOtherExpenses(items, targetMd) {
     const md = targetMd || getMonthData();
     if(!md.otherExpenses) md.otherExpenses = [];
+    const isAuto = e => e.feeSource || String(e.remark || '').startsWith('自动抓取');
+    // 自动抓取条目按 平台+订单号(或车牌)+费用类型 分组，整组替换：
+    // 先清掉该组全部旧自动条目（含旧版本留下的重复），再写入整组新条目。
+    const autoGroups = new Map();
+    const manual = [];
     items.forEach(item => {
-        // 按 平台+订单号+备注 去重（不比较金额符号），重导入时自动替换旧条目，避免正负重复
-        const exists = md.otherExpenses.some(e =>
-            e.platform === item.platform &&
-            e.orderNo === item.orderNo &&
-            e.remark === item.remark &&
-            e.feeSource === item.feeSource
-        );
-        if(!exists) {
-            md.otherExpenses.push({...item});
+        if(isAuto(item)) {
+            const k = `${item.platform}|${item.orderNo || item.plate || ''}|${item.feeType}`;
+            if(!autoGroups.has(k)) autoGroups.set(k, []);
+            autoGroups.get(k).push(item);
         } else {
-            // 已存在则覆盖（金额/车牌可能因口径变化而更新）
-            const t = md.otherExpenses.find(e => e.platform === item.platform && e.orderNo === item.orderNo && e.remark === item.remark && e.feeSource === item.feeSource);
-            if(t) Object.assign(t, {...item});
+            manual.push(item);
+        }
+    });
+    autoGroups.forEach((grp, k) => {
+        const parts = k.split('|');
+        const pf = parts[0], ono = parts[1], ft = parts.slice(2).join('|');
+        md.otherExpenses = md.otherExpenses.filter(e => {
+            if(e.platform !== pf || (e.orderNo || e.plate || '') !== ono || e.feeType !== ft) return true;
+            return !isAuto(e); // 旧自动条目删除；用户手动改写的同类条目保留
+        });
+        grp.forEach(item => md.otherExpenses.push({...item}));
+    });
+    // 手动/其他条目（如无车牌订单转入）：按 平台+订单号+备注+feeSource 去重，重导入替换旧值
+    manual.forEach(item => {
+        const same = e => e.platform === item.platform && e.orderNo === item.orderNo && e.remark === item.remark && e.feeSource === item.feeSource;
+        const t = md.otherExpenses.find(same);
+        if(t) {
+            Object.assign(t, {...item});
+        } else {
+            md.otherExpenses.push({...item});
         }
     });
 }
@@ -6122,14 +6139,38 @@ function scanFeeColumns(sheets, platform) {
             }
         }
     });
-    // 去重：平台+订单号+金额+类型+来源（防止多表/多列同时命中同一笔）
-    const seen = new Set();
-    return out.filter(e => {
-        const key = `${e.platform}|${e.orderNo}|${e.amount}|${e.feeType}|${e.feeSource}|${e.feeMonth || ''}`;
-        if(seen.has(key)) return false;
-        seen.add(key);
-        return true;
+    // 跨表去重（2026-10-21）：哈啰等平台「订单明细」（表头费用列，汇总值）与「费用项流水」
+    // （费用类型为单元格值，拆分行）会命中同一笔费用——如违章在明细=1000、流水=300+700 两行。
+    // 规则：同一 平台+订单号+费用类型 归为一组：
+    //   ① 组内含订单明细(orderDetail)版 → 只保留明细版（流水版是同一笔的拆分，全部丢弃，避免重复+虚增）；
+    //   ② 组内只有流水版 → 金额相同的合并为一条，金额不同的保留（可能是多笔独立费用）。
+    const groups = new Map();
+    out.forEach(e => {
+        const key = `${e.platform}|${e.orderNo || e.plate || ''}|${e.feeType}`;
+        if(!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(e);
     });
+    const deduped = [];
+    groups.forEach(arr => {
+        const od = arr.filter(e => e.feeSource === 'orderDetail');
+        if(od.length) {
+            // 只保留明细版；多条明细版金额相同再合并
+            const seenAmt = new Set();
+            od.forEach(e => {
+                if(seenAmt.has(e.amount)) return;
+                seenAmt.add(e.amount);
+                deduped.push(e);
+            });
+        } else {
+            const seenAmt = new Set();
+            arr.forEach(e => {
+                if(seenAmt.has(e.amount)) return;
+                seenAmt.add(e.amount);
+                deduped.push(e);
+            });
+        }
+    });
+    return deduped;
 }
 
 // 自动抓取的「流水/备注」来源费用（电费/车损/罚金/违章）= 成本，从车辆实收里减去。
