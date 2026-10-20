@@ -3498,7 +3498,7 @@ function handlePlatformImportMulti(e, platform) {
             }).join('、') : '';
             // 保存最近一次导入诊断，供「查看导入诊断」弹窗使用
             window.lastImportDiagnostics = {platform, diagnostics: agg.diagnostics, fileStats: agg.fileStats};
-            const feeNote = agg.feeCount ? `；自动抓取电费/车损/罚金/违章 ${agg.feeCount} 笔，已写入其他费用并按车牌扣减各车实收` : '';
+            const feeNote = agg.feeCount ? `；自动抓取电费/车损/罚金/违章 ${agg.feeCount} 笔（单元格值识别），已作为收入写入其他费用，记在当月` : '';
             if(agg.parsed === 0) {
                 showPlatformResult(platform, 'multi', 'warning', '未找到有效订单数据', '请确认文件是从' + getPlatformName(platform) + '平台导出的结算清单。');
             } else if(unmatchedSet.length > 0) {
@@ -5909,14 +5909,18 @@ function mergePlatformOtherExpenses(items, targetMd) {
     const md = targetMd || getMonthData();
     if(!md.otherExpenses) md.otherExpenses = [];
     items.forEach(item => {
+        // 按 平台+订单号+备注 去重（不比较金额符号），重导入时自动替换旧条目，避免正负重复
         const exists = md.otherExpenses.some(e =>
             e.platform === item.platform &&
             e.orderNo === item.orderNo &&
-            Math.abs((parseFloat(e.actualIncome) || 0) - (parseFloat(item.actualIncome) || 0)) < 0.01 &&
             e.remark === item.remark
         );
         if(!exists) {
             md.otherExpenses.push({...item});
+        } else {
+            // 已存在则覆盖（金额/车牌可能因口径变化而更新）
+            const t = md.otherExpenses.find(e => e.platform === item.platform && e.orderNo === item.orderNo && e.remark === item.remark);
+            if(t) Object.assign(t, {...item});
         }
     });
 }
@@ -6006,7 +6010,7 @@ function scanFeeColumns(sheets, platform) {
                 const val = parseFloat(raw);
                 if(!(val > 0)) return; // 只抓正数扣款金额
                 const {plate, orderNo} = grabCommon();
-                const amount = Math.round(-val * 100) / 100; // 成本：从实收扣减（负数）
+                const amount = Math.round(val * 100) / 100; // 正数=收入，记入其他费用，不扣实收
                 out.push({platform, orderNo, plate, amount, fee: 0, actualIncome: amount, feeType: fc.feeType, remark: `自动抓取-${fc.feeType}-${fc.header}`});
             });
             // ② 费用类型是单元格值（仅当本表没有表头费用列时启用，避免同表重复）
@@ -6030,9 +6034,9 @@ function scanFeeColumns(sheets, platform) {
                     if(!isNaN(v)) { val = v; return true; }
                     return false;
                 });
-                if(!(val > 0)) continue; // 只抓正数扣款金额
+                if(!(val > 0)) continue; // 只抓正数（收入）
                 const {plate, orderNo} = grabCommon();
-                const amount = Math.round(-val * 100) / 100;
+                const amount = Math.round(val * 100) / 100; // 正数=收入，记入其他费用，不扣实收
                 out.push({platform, orderNo, plate, amount, fee: 0, actualIncome: amount, feeType: hitType, remark: `自动抓取-${hitType}-${hitVal}`});
             }
         }
@@ -6047,17 +6051,11 @@ function scanFeeColumns(sheets, platform) {
     });
 }
 
-// 计算某车辆某平台的费用扣减合计（负数=扣减），仅统计带 feeType 的费用明细
+// 自动抓取的费用（电费/车损/罚金/违章）是正数=收入，已计入「其他费用」明细表，
+// 由 calcOtherExpensesByPlatform 汇总进各平台 otherFee（参与平台收入）。
+// 因此不再从车辆实收里扣减——这里固定返回 0，避免重复计算收入。
 function vehicleFeeDeduction(plate, platform) {
-    const md = getMonthData();
-    if(!md || !md.otherExpenses) return 0;
-    let d = 0;
-    md.otherExpenses.forEach(e => {
-        if(e.feeType && (e.platform || '') === platform && normalizePlate(e.plate || '') === normalizePlate(plate || '')) {
-            d += (parseFloat(e.actualIncome) || 0);
-        }
-    });
-    return d;
+    return 0;
 }
 
 function updateVehicleSummary(plate, field, value) {
@@ -6751,8 +6749,7 @@ function calcOtherExpensesByPlatform(monthData) {
     };
     if(!monthData.otherExpenses) return map;
     monthData.otherExpenses.forEach(e => {
-        // 带 feeType 的费用（车损/违章/罚金/电费）已单扣车辆实收，不再计入平台收入加项，避免重复计算
-        if(e.feeType) return;
+        // 带 feeType 的自动抓取费用（车损/违章/罚金/电费）= 正数收入，计入对应平台 otherFee（平台收入加项）
         const p = String(e.platform || '').trim().toLowerCase();
         const key = Object.keys(aliases).find(k => aliases[k].includes(p));
         if(key) {
