@@ -2535,6 +2535,8 @@ function renderOther(container) {
                             <th class="text-center">金额</th>
                             <th class="text-center">服务费</th>
                             <th class="text-center">实收</th>
+                            <th class="text-center">费用类型</th>
+                            <th class="text-center">车牌</th>
                             <th class="text-center">备注</th>
                             <th class="text-center" style="width:50px;"></th>
                         </tr>
@@ -2556,6 +2558,8 @@ function renderOther(container) {
                                 <td class="text-center"><input class="table-input w-full" value="${exp.amount}" onchange="updateOtherExpense(${i},'amount',this.value)" type="number" step="0.01"></td>
                                 <td class="text-center"><input class="table-input w-full" value="${exp.fee}" onchange="updateOtherExpense(${i},'fee',this.value)" type="number" step="0.01"></td>
                                 <td class="text-center"><input class="table-input w-full" value="${exp.actualIncome}" onchange="updateOtherExpense(${i},'actualIncome',this.value)" type="number" step="0.01"></td>
+                                <td class="text-center"><span class="inline-block px-1.5 py-0.5 rounded text-xs ${exp.feeType ? 'bg-rose-100 text-rose-700' : 'bg-gray-100 text-gray-500'}">${exp.feeType || '其他'}</span></td>
+                                <td class="text-center"><input class="table-input w-full" value="${exp.plate || ''}" onchange="updateOtherExpense(${i},'plate',this.value)" placeholder="车牌"></td>
                                 <td class="text-center"><input class="table-input w-full" value="${exp.remark}" onchange="updateOtherExpense(${i},'remark',this.value)"></td>
                                 <td class="text-center"><button onclick="deleteOtherExpense(${i})" class="text-red-500 hover:text-red-700 transition"><i class="fas fa-trash"></i></button></td>
                             </tr>
@@ -2565,6 +2569,8 @@ function renderOther(container) {
                             <td class="text-center font-bold">${fmt(md.otherExpenses.reduce((a,b)=>a+(parseFloat(b.amount)||0),0))}</td>
                             <td class="text-center font-bold">${fmt(md.otherExpenses.reduce((a,b)=>a+(parseFloat(b.fee)||0),0))}</td>
                             <td class="text-center font-bold">${fmt(md.otherExpenses.reduce((a,b)=>a+(parseFloat(b.actualIncome)||0),0))}</td>
+                            <td></td>
+                            <td></td>
                             <td colspan="2"></td>
                         </tr>
                     </tbody>
@@ -3492,18 +3498,19 @@ function handlePlatformImportMulti(e, platform) {
             }).join('、') : '';
             // 保存最近一次导入诊断，供「查看导入诊断」弹窗使用
             window.lastImportDiagnostics = {platform, diagnostics: agg.diagnostics, fileStats: agg.fileStats};
+            const feeNote = agg.feeCount ? `；自动抓取电费/车损/罚金/违章 ${agg.feeCount} 笔，已写入其他费用并按车牌扣减各车实收` : '';
             if(agg.parsed === 0) {
                 showPlatformResult(platform, 'multi', 'warning', '未找到有效订单数据', '请确认文件是从' + getPlatformName(platform) + '平台导出的结算清单。');
             } else if(unmatchedSet.length > 0) {
                 showPlatformResult(platform, 'multi', 'warning',
                     `${getPlatformName(platform)}结算清单导入完成，但有车辆未匹配！`,
-                    `共处理 ${agg.files}/${files.length} 个文件，解析 ${agg.parsed} 条订单，匹配 ${agg.matched} 辆车（其中自动新增 ${agg.generated} 辆），填入 ${agg.filled} 条订单明细。${unmatchedTxt}${errorTxt}${movedTxt}${perFileTxt}`
+                    `共处理 ${agg.files}/${files.length} 个文件，解析 ${agg.parsed} 条订单，匹配 ${agg.matched} 辆车（其中自动新增 ${agg.generated} 辆），填入 ${agg.filled} 条订单明细。${unmatchedTxt}${errorTxt}${movedTxt}${perFileTxt}${feeNote}`
                 );
                 showUnmatchedAlert(unmatchedSet);
             } else {
                 showPlatformResult(platform, 'multi', 'success',
                     `${getPlatformName(platform)}结算清单导入完成！`,
-                    `共处理 ${agg.files}/${files.length} 个文件，解析 ${agg.parsed} 条订单，匹配 ${agg.matched} 辆车（其中自动新增 ${agg.generated} 辆），填入 ${agg.filled} 条订单明细。${genTxt}${errorTxt}${movedTxt}${perFileTxt}`
+                    `共处理 ${agg.files}/${files.length} 个文件，解析 ${agg.parsed} 条订单，匹配 ${agg.matched} 辆车（其中自动新增 ${agg.generated} 辆），填入 ${agg.filled} 条订单明细。${genTxt}${errorTxt}${movedTxt}${perFileTxt}${feeNote}`
                 );
             }
             appendImportDiagnosticButton(platform);
@@ -3548,6 +3555,16 @@ function handlePlatformImportMulti(e, platform) {
                     // 改为逐个 sheet 解析，选择订单最多的工作表；并优先匹配「订单明细/明细」表。
                     result = parseBestPlatformSheet(workbook, platform);
                 }
+
+                // 扫描所有工作表，自动抓取电费/车损/罚金/违章，写入其他费用（带车牌，按订单关联车辆）
+                try {
+                    const feeSheets = workbook.SheetNames.map(n => ({name: n, rows: XLSX.utils.sheet_to_json(workbook.Sheets[n], {header: 1, defval: ''})}));
+                    const feeExp = scanFeeColumns(feeSheets, platform);
+                    if(feeExp.length) {
+                        result.otherExpenses = (result.otherExpenses || []).concat(feeExp);
+                        agg.feeCount = (agg.feeCount || 0) + feeExp.length;
+                    }
+                } catch(e) { console.error('fee scan error', e); }
 
                 if(result.orders.length > 0 || (result.otherExpenses && result.otherExpenses.length > 0)) {
                     let fillResult = {matched:0, filled:0, generated:0, unmatched:[]};
@@ -5271,7 +5288,11 @@ function correctImportMismatch(platform, corrList) {
 function recalcVehiclePlatformSummary(vd, platform) {
     if(!vd) return;
     const sum = sumOrders(vd.orders[platform] || []);
-    vd.summary[platform] = Math.round(sum.actualIncome * 100) / 100;
+    const md = getMonthData();
+    const plate = Object.keys(md.vehicles || {}).find(p => md.vehicles[p] === vd) || '';
+    // 费用扣减（车损/违章/罚金/电费）从车辆实收里减去，不体现为订单行
+    const actual = sum.actualIncome + vehicleFeeDeduction(plate, platform);
+    vd.summary[platform] = Math.round(actual * 100) / 100;
     vd.summary[platform + 'Pf'] = Math.round(sum.pickupFee * 100) / 100;
     vd.summary[platform + 'Other'] = Math.round(sum.otherFee * 100) / 100;
     vd.summary.pickupFee = Math.round((
@@ -5451,17 +5472,21 @@ function autoRecalculateAll() {
         const hs = sumOrders(v.orders.hello);
         const cs = sumOrders(v.orders.ctrip);
         const ws = sumOrders(v.orders.wukong);
+        const fdDidi = vehicleFeeDeduction(plate, 'didi');
+        const fdHello = vehicleFeeDeduction(plate, 'hello');
+        const fdCtrip = vehicleFeeDeduction(plate, 'ctrip');
+        const fdWukong = vehicleFeeDeduction(plate, 'wukong');
 
-        v.summary.didi = Math.round(ds.actualIncome * 100) / 100;
+        v.summary.didi = Math.round((ds.actualIncome + fdDidi) * 100) / 100;
         v.summary.didiPf = Math.round(ds.pickupFee * 100) / 100;
         v.summary.didiOther = Math.round(ds.otherFee * 100) / 100;
-        v.summary.hello = Math.round(hs.actualIncome * 100) / 100;
+        v.summary.hello = Math.round((hs.actualIncome + fdHello) * 100) / 100;
         v.summary.helloPf = Math.round(hs.pickupFee * 100) / 100;
         v.summary.helloOther = Math.round(hs.otherFee * 100) / 100;
-        v.summary.ctrip = Math.round(cs.actualIncome * 100) / 100;
+        v.summary.ctrip = Math.round((cs.actualIncome + fdCtrip) * 100) / 100;
         v.summary.ctripPf = Math.round(cs.pickupFee * 100) / 100;
         v.summary.ctripOther = Math.round(cs.otherFee * 100) / 100;
-        v.summary.wukong = Math.round(ws.actualIncome * 100) / 100;
+        v.summary.wukong = Math.round((ws.actualIncome + fdWukong) * 100) / 100;
         v.summary.wukongPf = Math.round(ws.pickupFee * 100) / 100;
         v.summary.wukongOther = Math.round(ws.otherFee * 100) / 100;
         v.summary.pickupFee = Math.round((ds.pickupFee + hs.pickupFee + cs.pickupFee + ws.pickupFee) * 100) / 100;
@@ -5859,7 +5884,7 @@ function addLoan() {
 
 function updateOtherExpense(idx, field, value) {
     const md = getMonthData();
-    md.otherExpenses[idx][field] = ['platform','orderNo','remark'].includes(field) ? value : (parseFloat(value) || 0);
+    md.otherExpenses[idx][field] = ['platform','orderNo','remark','plate','feeType'].includes(field) ? value : (parseFloat(value) || 0);
     recalculateMonthSummary(md);
     saveData();
     if(currentPage === 'dashboard' || currentPage === 'other') renderContent();
@@ -5867,7 +5892,7 @@ function updateOtherExpense(idx, field, value) {
 
 function addOtherExpense() {
     const md = getMonthData();
-    md.otherExpenses.push({platform:'', orderNo:'', amount:0, fee:0, actualIncome:0, remark:''});
+    md.otherExpenses.push({platform:'', orderNo:'', amount:0, fee:0, actualIncome:0, remark:'', plate:'', feeType:''});
     renderContent();
 }
 
@@ -5894,6 +5919,94 @@ function mergePlatformOtherExpenses(items, targetMd) {
             md.otherExpenses.push({...item});
         }
     });
+}
+
+// ==================== 费用扫描：从平台 Excel 抓取 电费/车损/罚金/违章 ====================
+// 关键词匹配（不依赖固定列名），按订单号关联车辆带出车牌，写入其他费用（负数=成本）。
+const FEE_KEYWORDS = {
+    '车损': ['车损', '维修', '事故', '剐蹭', '划痕', '实扣车损'],
+    '违章': ['违章', '实扣违章', '违章押金'],
+    '罚金': ['罚金', '违约金', '违约', '罚款'],
+    '电费': ['电费', '能源', '充电']
+};
+
+// 在前几行里找表头行（含最多已知表头词的那行）
+function findFeeHeaderRow(rows) {
+    const known = ['订单号', '单号', '订单编号', '订单', '车牌', '车损', '违章', '罚金', '电费', '违约金', '维修', '能源', '扣款', '实扣'];
+    let best = -1, bestScore = 0;
+    for(let i = 0; i < Math.min(rows.length, 6); i++) {
+        const r = rows[i] || [];
+        let score = 0;
+        for(const c of r) { if(known.some(k => String(c).trim().includes(k))) score++; }
+        if(score > bestScore) { bestScore = score; best = i; }
+    }
+    return bestScore >= 2 ? best : -1;
+}
+
+// 按订单号在当月订单里反查车辆车牌（找不到返回空）
+function resolvePlateByOrderNo(orderNo) {
+    if(!orderNo) return '';
+    const md = getMonthData();
+    if(!md || !md.vehicles) return '';
+    for(const [p, vd] of Object.entries(md.vehicles)) {
+        for(const pf of ['didi', 'hello', 'ctrip', 'wukong']) {
+            const arr = (vd.orders && vd.orders[pf]) || [];
+            for(const o of arr) { if(o && String(o.no) === orderNo) return p; }
+        }
+    }
+    return '';
+}
+
+// sheets: [{name, rows:[[]]}]  -> 其他费用明细条目数组
+function scanFeeColumns(sheets, platform) {
+    const out = [];
+    if(!sheets || !sheets.length) return out;
+    sheets.forEach(sh => {
+        const rows = sh.rows || [];
+        const hdrIdx = findFeeHeaderRow(rows);
+        if(hdrIdx < 0) return;
+        const hdr = (rows[hdrIdx] || []).map(c => String(c).trim());
+        let orderNoCol = -1, plateCol = -1;
+        const feeCols = [];
+        hdr.forEach((h, i) => {
+            if(orderNoCol < 0 && /订单号|单号|订单编号|订单ID|第三方单号|携程订单号|订单/.test(h)) orderNoCol = i;
+            if(plateCol < 0 && /车牌|车牌号|车牌照/.test(h)) plateCol = i;
+            for(const ft of Object.keys(FEE_KEYWORDS)) {
+                if(FEE_KEYWORDS[ft].some(k => h.includes(k)) && !/退款|退|返还|退还/.test(h)) {
+                    feeCols.push({col: i, feeType: ft, header: h});
+                }
+            }
+        });
+        if(feeCols.length === 0) return;
+        for(let i = hdrIdx + 1; i < rows.length; i++) {
+            const row = rows[i];
+            if(!row || row.every(c => !String(c).trim())) continue;
+            feeCols.forEach(fc => {
+                const raw = String(row[fc.col] || '').replace(/[^\d.\-]/g, '');
+                const val = parseFloat(raw);
+                if(!(val > 0)) return; // 只抓正数扣款金额
+                let plate = plateCol >= 0 ? normalizePlate(String(row[plateCol] || '')) : '';
+                const orderNo = orderNoCol >= 0 ? String(row[orderNoCol] || '').trim() : '';
+                if(!plate && orderNo) plate = resolvePlateByOrderNo(orderNo);
+                const amount = Math.round(-val * 100) / 100; // 成本：从实收扣减（负数）
+                out.push({platform, orderNo, plate, amount, fee: 0, actualIncome: amount, feeType: fc.feeType, remark: `自动抓取-${fc.feeType}-${fc.header}`});
+            });
+        }
+    });
+    return out;
+}
+
+// 计算某车辆某平台的费用扣减合计（负数=扣减），仅统计带 feeType 的费用明细
+function vehicleFeeDeduction(plate, platform) {
+    const md = getMonthData();
+    if(!md || !md.otherExpenses) return 0;
+    let d = 0;
+    md.otherExpenses.forEach(e => {
+        if(e.feeType && (e.platform || '') === platform && normalizePlate(e.plate || '') === normalizePlate(plate || '')) {
+            d += (parseFloat(e.actualIncome) || 0);
+        }
+    });
+    return d;
 }
 
 function updateVehicleSummary(plate, field, value) {
@@ -6511,16 +6624,16 @@ function recalculateMonthSummary(monthData) {
             const hs = sumOrders(v.orders.hello);
             const cs = sumOrders(v.orders.ctrip);
             const ws = sumOrders(v.orders.wukong);
-            v.summary.didi = ds.actualIncome;
+            v.summary.didi = Math.round((ds.actualIncome + vehicleFeeDeduction(plate, 'didi')) * 100) / 100;
             v.summary.didiPf = ds.pickupFee;
             v.summary.didiOther = ds.otherFee;
-            v.summary.hello = hs.actualIncome;
+            v.summary.hello = Math.round((hs.actualIncome + vehicleFeeDeduction(plate, 'hello')) * 100) / 100;
             v.summary.helloPf = hs.pickupFee;
             v.summary.helloOther = hs.otherFee;
-            v.summary.ctrip = cs.actualIncome;
+            v.summary.ctrip = Math.round((cs.actualIncome + vehicleFeeDeduction(plate, 'ctrip')) * 100) / 100;
             v.summary.ctripPf = cs.pickupFee;
             v.summary.ctripOther = cs.otherFee;
-            v.summary.wukong = ws.actualIncome;
+            v.summary.wukong = Math.round((ws.actualIncome + vehicleFeeDeduction(plate, 'wukong')) * 100) / 100;
             v.summary.wukongPf = ws.pickupFee;
             v.summary.wukongOther = ws.otherFee;
             v.summary.pickupFee = ds.pickupFee + hs.pickupFee + cs.pickupFee + ws.pickupFee;
@@ -6587,6 +6700,8 @@ function calcOtherExpensesByPlatform(monthData) {
     };
     if(!monthData.otherExpenses) return map;
     monthData.otherExpenses.forEach(e => {
+        // 带 feeType 的费用（车损/违章/罚金/电费）已单扣车辆实收，不再计入平台收入加项，避免重复计算
+        if(e.feeType) return;
         const p = String(e.platform || '').trim().toLowerCase();
         const key = Object.keys(aliases).find(k => aliases[k].includes(p));
         if(key) {
