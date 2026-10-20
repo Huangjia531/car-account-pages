@@ -6175,8 +6175,10 @@ function scanFeeColumns(sheets, platform) {
     return deduped;
 }
 
-// 成本费用行判定（2026-10-21 v6）：无 feeSource 的手动/遗留行，费用类型或备注表明是成本
-//（违约金/罚金/违章/车损/维修/电费/能源/扣款）。这类行不是收入：应从车辆实收扣减、不计入平台收入。
+// 成本费用行判定（2026-10-21 v6→v8）：无 feeSource 的手动/遗留行，费用类型或备注表明是成本
+//（违约金/罚金/违章/车损/维修/电费/能源/扣款）。这类行：从车辆实收扣减（vehicleFeeDeduction），
+// 同时其金额计入平台收入（calcOtherExpensesByPlatform，用户口径"其他费用金额要加到平台收入"），
+// 相抵后平台收入净额不变，车辆实收体现该车承担的成本。
 const COST_FEE_RE = /违约金|违约|罚金|罚款|违章|车损|维修|事故|剐蹭|划痕|电费|能源|充电|扣款/;
 function isManualCostRow(e) {
     if(!e || e.feeSource) return false;               // 自动抓取行走 feeSource 原有口径
@@ -6925,14 +6927,14 @@ function calcOtherExpensesByPlatform(monthData) {
     };
     if(!monthData.otherExpenses) return map;
     monthData.otherExpenses.forEach(e => {
-        // 挂在车牌下的自动抓取费用（带 feeSource：车损/违章/罚金/电费）是成本，已在车辆实收扣减，
-        // 不计入平台收入（费用不是收入）。
-        // 手动/遗留成本行（违约金/罚金/违章/车损/电费等，isManualCostRow）同理：从车辆实收扣减，
-        // 不再作为收入计入平台收入（2026-10-21 v6：哈啰违约金74 误入平台收入问题）。
-        // 以下两类仍计入平台收入：
-        //  ① 无车牌订单转入（feeType='无车牌订单'，无 feeSource，无车牌）——属于独立一行收入，应加入平台收入；
-        //  ② 用户手动填写的其他费用（无 feeSource、非成本类型）——按 actualIncome 正负计入。
-        if(e.feeSource || isManualCostRow(e)) return;
+        // 平台收入口径（2026-10-21 v8，按用户最终确认）：其他费用金额一律计入平台收入（按 actualIncome 正负）。
+        // 仅「自动抓取」行(feeSource：订单明细/流水备注抓到的车损/罚金/违章/电费) 不计入——
+        //   它们属于成本，已在车辆实收扣减（flowRemark 当月减；orderDetail 已含结算），平台收入不再重复加减。
+        // 手动/遗留成本行（违约金/罚金/车损/电费等，isManualCostRow，无 feeSource）按用户口径：
+        //   金额计入平台收入「其他费用」行，同时已在车辆实收扣减（vehicleFeeDeduction），两者相抵平台收入净额不变，
+        //   但车辆实收体现该车承担的成本、其他费用明细体现这笔金额（用户原话："其他费用的金额要加到平台收入，这个扣款的车辆实收减去"）。
+        // 无车牌订单转入（feeType='无车牌订单'）同样计入平台收入。
+        if(e.feeSource) return;
         const p = String(e.platform || '').trim().toLowerCase();
         const key = Object.keys(aliases).find(k => aliases[k].includes(p));
         if(key) {
