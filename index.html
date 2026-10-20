@@ -2558,7 +2558,7 @@ function renderOther(container) {
                                 <td class="text-center"><input class="table-input w-full" value="${exp.amount}" onchange="updateOtherExpense(${i},'amount',this.value)" type="number" step="0.01"></td>
                                 <td class="text-center"><input class="table-input w-full" value="${exp.fee}" onchange="updateOtherExpense(${i},'fee',this.value)" type="number" step="0.01"></td>
                                 <td class="text-center"><input class="table-input w-full" value="${exp.actualIncome}" onchange="updateOtherExpense(${i},'actualIncome',this.value)" type="number" step="0.01"></td>
-                                <td class="text-center"><span class="inline-block px-1.5 py-0.5 rounded text-xs ${exp.feeType ? 'bg-rose-100 text-rose-700' : 'bg-gray-100 text-gray-500'}">${exp.feeType || '其他'}</span></td>
+                                <td class="text-center"><span class="inline-block px-1.5 py-0.5 rounded text-xs ${exp.feeType ? 'bg-rose-100 text-rose-700' : 'bg-gray-100 text-gray-500'}">${exp.feeType || '其他'}</span>${exp.feeSource === 'flowRemark' ? '<span class="ml-1 text-xs text-orange-600">↓实收</span>' : (exp.feeSource === 'orderDetail' ? '<span class="ml-1 text-xs text-gray-400">含结算</span>' : '')}</td>
                                 <td class="text-center"><input class="table-input w-full" value="${exp.plate || ''}" onchange="updateOtherExpense(${i},'plate',this.value)" placeholder="车牌"></td>
                                 <td class="text-center"><input class="table-input w-full" value="${exp.remark}" onchange="updateOtherExpense(${i},'remark',this.value)"></td>
                                 <td class="text-center"><button onclick="deleteOtherExpense(${i})" class="text-red-500 hover:text-red-700 transition"><i class="fas fa-trash"></i></button></td>
@@ -3498,7 +3498,7 @@ function handlePlatformImportMulti(e, platform) {
             }).join('、') : '';
             // 保存最近一次导入诊断，供「查看导入诊断」弹窗使用
             window.lastImportDiagnostics = {platform, diagnostics: agg.diagnostics, fileStats: agg.fileStats};
-            const feeNote = agg.feeCount ? `；自动抓取电费/车损/罚金/违章 ${agg.feeCount} 笔（单元格值识别），已作为收入写入其他费用，记在当月` : '';
+            const feeNote = agg.feeCount ? `；自动抓取电费/车损/罚金/违章 ${agg.feeCount} 笔，写入其他费用（正数记录），其中「流水/备注」来源的已在各车实收中扣除，记在当月` : '';
             if(agg.parsed === 0) {
                 showPlatformResult(platform, 'multi', 'warning', '未找到有效订单数据', '请确认文件是从' + getPlatformName(platform) + '平台导出的结算清单。');
             } else if(unmatchedSet.length > 0) {
@@ -5290,8 +5290,9 @@ function recalcVehiclePlatformSummary(vd, platform) {
     const sum = sumOrders(vd.orders[platform] || []);
     const md = getMonthData();
     const plate = Object.keys(md.vehicles || {}).find(p => md.vehicles[p] === vd) || '';
-    // 费用扣减（车损/违章/罚金/电费）从车辆实收里减去，不体现为订单行
-    const actual = sum.actualIncome + vehicleFeeDeduction(plate, platform);
+    // 费用扣减：仅「流水/备注」抓到的费用（feeSource==='flowRemark'）从车辆实收里减去（成本）；
+    // 「订单明细」抓到的费用已含在结算内，不减实收。均不体现为订单行。
+    const actual = sum.actualIncome - vehicleFeeDeduction(plate, platform);
     vd.summary[platform] = Math.round(actual * 100) / 100;
     vd.summary[platform + 'Pf'] = Math.round(sum.pickupFee * 100) / 100;
     vd.summary[platform + 'Other'] = Math.round(sum.otherFee * 100) / 100;
@@ -5913,20 +5914,23 @@ function mergePlatformOtherExpenses(items, targetMd) {
         const exists = md.otherExpenses.some(e =>
             e.platform === item.platform &&
             e.orderNo === item.orderNo &&
-            e.remark === item.remark
+            e.remark === item.remark &&
+            e.feeSource === item.feeSource
         );
         if(!exists) {
             md.otherExpenses.push({...item});
         } else {
             // 已存在则覆盖（金额/车牌可能因口径变化而更新）
-            const t = md.otherExpenses.find(e => e.platform === item.platform && e.orderNo === item.orderNo && e.remark === item.remark);
+            const t = md.otherExpenses.find(e => e.platform === item.platform && e.orderNo === item.orderNo && e.remark === item.remark && e.feeSource === item.feeSource);
             if(t) Object.assign(t, {...item});
         }
     });
 }
 
 // ==================== 费用扫描：从平台 Excel 抓取 电费/车损/罚金/违章 ====================
-// 关键词匹配（不依赖固定列名），按订单号关联车辆带出车牌，写入其他费用（负数=成本）。
+// 关键词匹配（不依赖固定列名），按订单号关联车辆带出车牌，写入其他费用（正数记录）。
+// 来源区分：订单明细里的费用列 → feeSource='orderDetail'（已含结算，不减实收）；
+//          流水表「流水类型/备注」单元格值 → feeSource='flowRemark'（成本，减实收）。所有平台一致。
 const FEE_KEYWORDS = {
     '车损': ['车损', '维修', '事故', '剐蹭', '划痕', '实扣车损'],
     '违章': ['违章', '实扣违章', '违章押金'],
@@ -6008,10 +6012,10 @@ function scanFeeColumns(sheets, platform) {
             feeCols.forEach(fc => {
                 const raw = String(row[fc.col] || '').replace(/[^\d.\-]/g, '');
                 const val = parseFloat(raw);
-                if(!(val > 0)) return; // 只抓正数扣款金额
+                if(!(val > 0)) return; // 只抓正数
                 const {plate, orderNo} = grabCommon();
-                const amount = Math.round(val * 100) / 100; // 正数=收入，记入其他费用，不扣实收
-                out.push({platform, orderNo, plate, amount, fee: 0, actualIncome: amount, feeType: fc.feeType, remark: `自动抓取-${fc.feeType}-${fc.header}`});
+                const amount = Math.round(val * 100) / 100; // 正数记录；订单明细来源不减实收
+                out.push({platform, orderNo, plate, amount, fee: 0, actualIncome: amount, feeType: fc.feeType, feeSource: 'orderDetail', remark: `自动抓取-${fc.feeType}-${fc.header}`});
             });
             // ② 费用类型是单元格值（仅当本表没有表头费用列时启用，避免同表重复）
             if(feeCols.length === 0 && valCols.length) {
@@ -6034,28 +6038,35 @@ function scanFeeColumns(sheets, platform) {
                     if(!isNaN(v)) { val = v; return true; }
                     return false;
                 });
-                if(!(val > 0)) continue; // 只抓正数（收入）
+                if(!(val > 0)) continue; // 只抓正数
                 const {plate, orderNo} = grabCommon();
-                const amount = Math.round(val * 100) / 100; // 正数=收入，记入其他费用，不扣实收
-                out.push({platform, orderNo, plate, amount, fee: 0, actualIncome: amount, feeType: hitType, remark: `自动抓取-${hitType}-${hitVal}`});
+                const amount = Math.round(val * 100) / 100; // 正数记录；流水备注来源需减实收
+                out.push({platform, orderNo, plate, amount, fee: 0, actualIncome: amount, feeType: hitType, feeSource: 'flowRemark', remark: `自动抓取-${hitType}-${hitVal}`});
             }
         }
     });
-    // 去重：平台+订单号+金额+类型（防止多表/多列同时命中同一笔）
+    // 去重：平台+订单号+金额+类型+来源（防止多表/多列同时命中同一笔）
     const seen = new Set();
     return out.filter(e => {
-        const key = `${e.platform}|${e.orderNo}|${e.amount}|${e.feeType}`;
+        const key = `${e.platform}|${e.orderNo}|${e.amount}|${e.feeType}|${e.feeSource}`;
         if(seen.has(key)) return false;
         seen.add(key);
         return true;
     });
 }
 
-// 自动抓取的费用（电费/车损/罚金/违章）是正数=收入，已计入「其他费用」明细表，
-// 由 calcOtherExpensesByPlatform 汇总进各平台 otherFee（参与平台收入）。
-// 因此不再从车辆实收里扣减——这里固定返回 0，避免重复计算收入。
+// 自动抓取的「流水/备注」来源费用（电费/车损/罚金/违章）= 成本，从车辆实收里减去。
+// 「订单明细」来源的费用已含在结算内，不减实收（返回 0）。
 function vehicleFeeDeduction(plate, platform) {
-    return 0;
+    const md = getMonthData();
+    if(!md || !md.otherExpenses) return 0;
+    let d = 0;
+    md.otherExpenses.forEach(e => {
+        if(e.feeSource === 'flowRemark' && (e.platform || '') === platform && normalizePlate(e.plate || '') === normalizePlate(plate || '')) {
+            d += (parseFloat(e.amount) || 0);
+        }
+    });
+    return d;
 }
 
 function updateVehicleSummary(plate, field, value) {
@@ -6749,7 +6760,10 @@ function calcOtherExpensesByPlatform(monthData) {
     };
     if(!monthData.otherExpenses) return map;
     monthData.otherExpenses.forEach(e => {
-        // 带 feeType 的自动抓取费用（车损/违章/罚金/电费）= 正数收入，计入对应平台 otherFee（平台收入加项）
+        // 仅自动抓取的费用（带 feeSource）不计入平台收入加项：
+        // 「流水来源」已从车辆实收扣减，「订单明细来源」已含在结算内，均避免重复。
+        // 手动填写的费用（无 feeSource，即便有 feeType）仍按 actualIncome 计入收入。
+        if(e.feeSource) return;
         const p = String(e.platform || '').trim().toLowerCase();
         const key = Object.keys(aliases).find(k => aliases[k].includes(p));
         if(key) {
