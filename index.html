@@ -2558,7 +2558,7 @@ function renderOther(container) {
                                 <td class="text-center"><input class="table-input w-full" value="${exp.amount}" onchange="updateOtherExpense(${i},'amount',this.value)" type="number" step="0.01"></td>
                                 <td class="text-center"><input class="table-input w-full" value="${exp.fee}" onchange="updateOtherExpense(${i},'fee',this.value)" type="number" step="0.01"></td>
                                 <td class="text-center"><input class="table-input w-full" value="${exp.actualIncome}" onchange="updateOtherExpense(${i},'actualIncome',this.value)" type="number" step="0.01"></td>
-                                <td class="text-center"><span class="inline-block px-1.5 py-0.5 rounded text-xs ${exp.feeType ? 'bg-rose-100 text-rose-700' : 'bg-gray-100 text-gray-500'}">${exp.feeType || '其他'}</span>${exp.feeSource === 'flowRemark' ? (exp.feeMonth && exp.feeMonth === getCurrentMonthKey() ? '<span class="ml-1 text-xs text-orange-600">↓减实收</span>' : '<span class="ml-1 text-xs text-gray-400">仅记录</span>') : (exp.feeSource === 'orderDetail' ? '<span class="ml-1 text-xs text-gray-400">含结算</span>' : (exp.feeType === '无车牌订单' ? '<span class="ml-1 text-xs text-emerald-600">计入收入</span>' : ''))}</td>
+                                <td class="text-center"><span class="inline-block px-1.5 py-0.5 rounded text-xs ${exp.feeType ? 'bg-rose-100 text-rose-700' : 'bg-gray-100 text-gray-500'}">${exp.feeType || '其他'}</span>${exp.feeSource === 'flowRemark' ? (exp.feeMonth && exp.feeMonth === getCurrentMonthKey() ? '<span class="ml-1 text-xs text-orange-600">↓减实收</span>' : '<span class="ml-1 text-xs text-gray-400">仅记录</span>') : (exp.feeSource === 'orderDetail' ? '<span class="ml-1 text-xs text-gray-400">含结算</span>' : (isManualCostRow(exp) ? '<span class="ml-1 text-xs text-orange-600">↓减实收</span>' : (exp.feeType === '无车牌订单' ? '<span class="ml-1 text-xs text-emerald-600">计入收入</span>' : '')))}</td>
                                 <td class="text-center"><input class="table-input w-full" value="${exp.plate || ''}" onchange="updateOtherExpense(${i},'plate',this.value)" placeholder="车牌"></td>
                                 <td class="text-center"><input class="table-input w-full" value="${exp.remark}" onchange="updateOtherExpense(${i},'remark',this.value)"></td>
                                 <td class="text-center"><button onclick="deleteOtherExpense(${i})" class="text-red-500 hover:text-red-700 transition"><i class="fas fa-trash"></i></button></td>
@@ -5527,16 +5527,18 @@ function autoRecalculateAll() {
         const fdCtrip = vehicleFeeDeduction(plate, 'ctrip');
         const fdWukong = vehicleFeeDeduction(plate, 'wukong');
 
-        v.summary.didi = Math.round((ds.actualIncome + fdDidi) * 100) / 100;
+        // 费用是成本：车辆平台收入 = 订单实收合计 − 费用扣减（flowRemark 当月 + 手动成本行），
+        // 与 recalcVehiclePlatformSummary 口径一致（2026-10-21 v6：原 +fd 加回口径废弃）。
+        v.summary.didi = Math.round((ds.actualIncome - fdDidi) * 100) / 100;
         v.summary.didiPf = Math.round(ds.pickupFee * 100) / 100;
         v.summary.didiOther = Math.round(ds.otherFee * 100) / 100;
-        v.summary.hello = Math.round((hs.actualIncome + fdHello) * 100) / 100;
+        v.summary.hello = Math.round((hs.actualIncome - fdHello) * 100) / 100;
         v.summary.helloPf = Math.round(hs.pickupFee * 100) / 100;
         v.summary.helloOther = Math.round(hs.otherFee * 100) / 100;
-        v.summary.ctrip = Math.round((cs.actualIncome + fdCtrip) * 100) / 100;
+        v.summary.ctrip = Math.round((cs.actualIncome - fdCtrip) * 100) / 100;
         v.summary.ctripPf = Math.round(cs.pickupFee * 100) / 100;
         v.summary.ctripOther = Math.round(cs.otherFee * 100) / 100;
-        v.summary.wukong = Math.round((ws.actualIncome + fdWukong) * 100) / 100;
+        v.summary.wukong = Math.round((ws.actualIncome - fdWukong) * 100) / 100;
         v.summary.wukongPf = Math.round(ws.pickupFee * 100) / 100;
         v.summary.wukongOther = Math.round(ws.otherFee * 100) / 100;
         v.summary.pickupFee = Math.round((ds.pickupFee + hs.pickupFee + cs.pickupFee + ws.pickupFee) * 100) / 100;
@@ -6173,17 +6175,60 @@ function scanFeeColumns(sheets, platform) {
     return deduped;
 }
 
+// 成本费用行判定（2026-10-21 v6）：无 feeSource 的手动/遗留行，费用类型或备注表明是成本
+//（违约金/罚金/违章/车损/维修/电费/能源/扣款）。这类行不是收入：应从车辆实收扣减、不计入平台收入。
+const COST_FEE_RE = /违约金|违约|罚金|罚款|违章|车损|维修|事故|剐蹭|划痕|电费|能源|充电|扣款/;
+function isManualCostRow(e) {
+    if(!e || e.feeSource) return false;               // 自动抓取行走 feeSource 原有口径
+    if(e.feeType === '无车牌订单') return false;       // 无车牌订单转入是收入行
+    const ft = String(e.feeType || '').trim();
+    const rk = String(e.remark || '').trim();
+    if(ft && COST_FEE_RE.test(ft)) return true;
+    // feeType 为空时看备注；排除「押金分账/分账/转入」等收入型备注
+    if(!ft && rk && COST_FEE_RE.test(rk) && !/押金|分账|转入|退款|返还/.test(rk)) return true;
+    return false;
+}
+
+// 按订单号定位车辆：先精确匹配，再双向包含匹配（兼容遗留行订单号被截断的情况）
+function findPlateByOrderNo(orderNo, platform, md) {
+    const ono = String(orderNo || '').trim();
+    if(!ono || ono.length < 8 || !md || !md.vehicles) return null;
+    let hit = null;
+    Object.keys(md.vehicles).some(plate => {
+        const arr = (md.vehicles[plate].orders && md.vehicles[plate].orders[platform]) || [];
+        return arr.some(o => {
+            const on = String(o.no || '').trim();
+            if(!on) return false;
+            if(on === ono || on.includes(ono) || ono.includes(on)) { hit = plate; return true; }
+            return false;
+        });
+    });
+    return hit;
+}
+
 // 自动抓取的「流水/备注」来源费用（电费/车损/罚金/违章）= 成本，从车辆实收里减去。
 // 「订单明细」来源的费用已含在结算内，不减实收（返回 0）。
 // 仅当费用实际所属月份 = 当前查看月份时才减实收；跨月费用（如 6 月罚金在 8 月查看）只记录、不减实收。
+// 手动/遗留成本行（isManualCostRow）：车牌直接匹配；无车牌时按订单号定位车辆后扣减
+//（其他费用表按月存储，行只存在于其所属月份，无需 feeMonth 判断）。
 function vehicleFeeDeduction(plate, platform) {
     const md = getMonthData();
     if(!md || !md.otherExpenses) return 0;
     const curKey = getCurrentMonthKey();
     let d = 0;
     md.otherExpenses.forEach(e => {
-        if(e.feeSource === 'flowRemark' && (e.platform || '') === platform && normalizePlate(e.plate || '') === normalizePlate(plate || '')) {
-            if(e.feeMonth && e.feeMonth === curKey) d += (parseFloat(e.amount) || 0);
+        const amt = Math.abs(parseFloat(e.actualIncome) || parseFloat(e.amount) || 0);
+        if(e.feeSource === 'flowRemark') {
+            if((e.platform || '') === platform && normalizePlate(e.plate || '') === normalizePlate(plate || '')) {
+                if(e.feeMonth && e.feeMonth === curKey) d += amt;
+            }
+        } else if(isManualCostRow(e)) {
+            if((e.platform || '') !== platform) return;
+            if(e.plate && normalizePlate(e.plate) === normalizePlate(plate || '')) { d += amt; return; }
+            if(!e.plate && e.orderNo) {
+                const hit = findPlateByOrderNo(e.orderNo, platform, md);
+                if(hit && normalizePlate(hit) === normalizePlate(plate || '')) d += amt;
+            }
         }
     });
     return d;
@@ -6804,16 +6849,16 @@ function recalculateMonthSummary(monthData) {
             const hs = sumOrders(v.orders.hello);
             const cs = sumOrders(v.orders.ctrip);
             const ws = sumOrders(v.orders.wukong);
-            v.summary.didi = Math.round((ds.actualIncome + vehicleFeeDeduction(plate, 'didi')) * 100) / 100;
+            v.summary.didi = Math.round((ds.actualIncome - vehicleFeeDeduction(plate, 'didi')) * 100) / 100;
             v.summary.didiPf = ds.pickupFee;
             v.summary.didiOther = ds.otherFee;
-            v.summary.hello = Math.round((hs.actualIncome + vehicleFeeDeduction(plate, 'hello')) * 100) / 100;
+            v.summary.hello = Math.round((hs.actualIncome - vehicleFeeDeduction(plate, 'hello')) * 100) / 100;
             v.summary.helloPf = hs.pickupFee;
             v.summary.helloOther = hs.otherFee;
-            v.summary.ctrip = Math.round((cs.actualIncome + vehicleFeeDeduction(plate, 'ctrip')) * 100) / 100;
+            v.summary.ctrip = Math.round((cs.actualIncome - vehicleFeeDeduction(plate, 'ctrip')) * 100) / 100;
             v.summary.ctripPf = cs.pickupFee;
             v.summary.ctripOther = cs.otherFee;
-            v.summary.wukong = Math.round((ws.actualIncome + vehicleFeeDeduction(plate, 'wukong')) * 100) / 100;
+            v.summary.wukong = Math.round((ws.actualIncome - vehicleFeeDeduction(plate, 'wukong')) * 100) / 100;
             v.summary.wukongPf = ws.pickupFee;
             v.summary.wukongOther = ws.otherFee;
             v.summary.pickupFee = ds.pickupFee + hs.pickupFee + cs.pickupFee + ws.pickupFee;
@@ -6880,12 +6925,14 @@ function calcOtherExpensesByPlatform(monthData) {
     };
     if(!monthData.otherExpenses) return map;
     monthData.otherExpenses.forEach(e => {
-        // 挂在车牌下的自动抓取费用（带 feeSource：车损/违章/罚金/电费）是成本，已在 recalcVehiclePlatformSummary 从车辆实收扣减，
-        // 不再计入平台收入（避免重复、也符合「费用不算收入」的口径）。
+        // 挂在车牌下的自动抓取费用（带 feeSource：车损/违章/罚金/电费）是成本，已在车辆实收扣减，
+        // 不计入平台收入（费用不是收入）。
+        // 手动/遗留成本行（违约金/罚金/违章/车损/电费等，isManualCostRow）同理：从车辆实收扣减，
+        // 不再作为收入计入平台收入（2026-10-21 v6：哈啰违约金74 误入平台收入问题）。
         // 以下两类仍计入平台收入：
         //  ① 无车牌订单转入（feeType='无车牌订单'，无 feeSource，无车牌）——属于独立一行收入，应加入平台收入；
-        //  ② 用户手动填写的其他费用（无 feeSource）——按 actualIncome 正负计入。
-        if(e.feeSource) return;
+        //  ② 用户手动填写的其他费用（无 feeSource、非成本类型）——按 actualIncome 正负计入。
+        if(e.feeSource || isManualCostRow(e)) return;
         const p = String(e.platform || '').trim().toLowerCase();
         const key = Object.keys(aliases).find(k => aliases[k].includes(p));
         if(key) {
