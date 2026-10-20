@@ -5958,42 +5958,93 @@ function resolvePlateByOrderNo(orderNo) {
 }
 
 // sheets: [{name, rows:[[]]}]  -> 其他费用明细条目数组
+// 两种抓取方式：
+// ① 表头即费用列（如「实扣车损」「违章押金」列）→ 取该列数值；
+// ② 费用类型是单元格值（如携程流水「流水类型=罚金」「备注=车损维修」）→ 从行内金额列取值。
 function scanFeeColumns(sheets, platform) {
     const out = [];
     if(!sheets || !sheets.length) return out;
+    // 行内金额列优先级：结算价金额 > 实扣/扣款金额 > 底价金额 > 金额
+    const AMT_PRIORITY = [/^结算价金额$/, /实扣.*金额|扣款金额/, /底价金额/, /^金额$/];
     sheets.forEach(sh => {
         const rows = sh.rows || [];
         const hdrIdx = findFeeHeaderRow(rows);
         if(hdrIdx < 0) return;
         const hdr = (rows[hdrIdx] || []).map(c => String(c).trim());
-        let orderNoCol = -1, plateCol = -1;
+        let orderNoCol = -1, orderNoPri = 99, plateCol = -1;
         const feeCols = [];
+        const valCols = [];   // 费用类型可能作为「值」出现的列（流水类型/备注等）
+        const amtCols = [];   // 行内候选金额列 {col, pri}
         hdr.forEach((h, i) => {
-            if(orderNoCol < 0 && /订单号|单号|订单编号|订单ID|第三方单号|携程订单号|订单/.test(h)) orderNoCol = i;
+            // 订单号列按优先级选：订单号/订单编号 > 第三方单号 > 其他单号（避免「携程付款单号」抢占）
+            const onoPri = /订单号|订单编号|订单ID|携程订单号/.test(h) ? 0 : (/第三方单号/.test(h) ? 1 : ((/单号|订单/.test(h)) ? 2 : 99));
+            if(onoPri < orderNoPri) { orderNoPri = onoPri; orderNoCol = i; }
             if(plateCol < 0 && /车牌|车牌号|车牌照/.test(h)) plateCol = i;
             for(const ft of Object.keys(FEE_KEYWORDS)) {
                 if(FEE_KEYWORDS[ft].some(k => h.includes(k)) && !/退款|退|返还|退还/.test(h)) {
                     feeCols.push({col: i, feeType: ft, header: h});
                 }
             }
+            if(/备注|流水类型|费用类型|费用项目|扣款项|扣款项目|款项|费用说明/.test(h)) valCols.push(i);
+            const amtPri = AMT_PRIORITY.findIndex(re => re.test(h));
+            if(amtPri >= 0) amtCols.push({col: i, pri: amtPri});
         });
-        if(feeCols.length === 0) return;
+        if(feeCols.length === 0 && valCols.length === 0) return;
+        const amtColsSorted = amtCols.slice().sort((a, b) => a.pri - b.pri);
         for(let i = hdrIdx + 1; i < rows.length; i++) {
             const row = rows[i];
             if(!row || row.every(c => !String(c).trim())) continue;
+            const grabCommon = () => {
+                let plate = plateCol >= 0 ? normalizePlate(String(row[plateCol] || '')) : '';
+                const orderNo = orderNoCol >= 0 ? String(row[orderNoCol] || '').trim() : '';
+                if(!plate && orderNo) plate = resolvePlateByOrderNo(orderNo);
+                return { plate, orderNo };
+            };
+            // ① 表头即费用列：直接取该列数值
             feeCols.forEach(fc => {
                 const raw = String(row[fc.col] || '').replace(/[^\d.\-]/g, '');
                 const val = parseFloat(raw);
                 if(!(val > 0)) return; // 只抓正数扣款金额
-                let plate = plateCol >= 0 ? normalizePlate(String(row[plateCol] || '')) : '';
-                const orderNo = orderNoCol >= 0 ? String(row[orderNoCol] || '').trim() : '';
-                if(!plate && orderNo) plate = resolvePlateByOrderNo(orderNo);
+                const {plate, orderNo} = grabCommon();
                 const amount = Math.round(-val * 100) / 100; // 成本：从实收扣减（负数）
                 out.push({platform, orderNo, plate, amount, fee: 0, actualIncome: amount, feeType: fc.feeType, remark: `自动抓取-${fc.feeType}-${fc.header}`});
             });
+            // ② 费用类型是单元格值（仅当本表没有表头费用列时启用，避免同表重复）
+            if(feeCols.length === 0 && valCols.length) {
+                let hitType = '', hitVal = '';
+                for(const vi of valCols) {
+                    const txt = String(row[vi] || '').trim();
+                    if(!txt) continue;
+                    for(const ft of Object.keys(FEE_KEYWORDS)) {
+                        const kw = FEE_KEYWORDS[ft].find(k => txt.includes(k));
+                        if(kw) { hitType = ft; hitVal = txt; break; }
+                    }
+                    if(hitType) break;
+                }
+                if(!hitType) continue;
+                // 金额列按优先级取第一个有数值的（底价/结算价并存时只取一次）
+                let val = NaN;
+                amtColsSorted.some(ac => {
+                    const raw = String(row[ac.col] || '').replace(/[^\d.\-]/g, '');
+                    const v = parseFloat(raw);
+                    if(!isNaN(v)) { val = v; return true; }
+                    return false;
+                });
+                if(!(val > 0)) continue; // 只抓正数扣款金额
+                const {plate, orderNo} = grabCommon();
+                const amount = Math.round(-val * 100) / 100;
+                out.push({platform, orderNo, plate, amount, fee: 0, actualIncome: amount, feeType: hitType, remark: `自动抓取-${hitType}-${hitVal}`});
+            }
         }
     });
-    return out;
+    // 去重：平台+订单号+金额+类型（防止多表/多列同时命中同一笔）
+    const seen = new Set();
+    return out.filter(e => {
+        const key = `${e.platform}|${e.orderNo}|${e.amount}|${e.feeType}`;
+        if(seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    });
 }
 
 // 计算某车辆某平台的费用扣减合计（负数=扣减），仅统计带 feeType 的费用明细
