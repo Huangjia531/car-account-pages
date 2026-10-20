@@ -5961,6 +5961,52 @@ function mergePlatformOtherExpenses(items, targetMd) {
     const md = targetMd || getMonthData();
     if(!md.otherExpenses) md.otherExpenses = [];
     const isAuto = e => e.feeSource || String(e.remark || '').startsWith('自动抓取');
+    // 订单号匹配：相等 或 一方为另一方前缀（长度≥12，兼容截断单号的遗留行）
+    const ordMatch = (a, b) => {
+        a = String(a || '').trim(); b = String(b || '').trim();
+        if(!a || !b) return false;
+        return a === b || (a.length >= 12 && b.length >= 12 && (a.startsWith(b) || b.startsWith(a)));
+    };
+
+    // ① 无车牌订单转入的订单：其「合计」已整体转入其他费用（合计内含违章/车损等所有费用列），
+    //    同订单号的自动抓取费用行属于重复，不生成、并清掉旧的同单自动费用行。
+    //    （例：哈啰订单 DP…合计1019.2 已转入，违章1000 行不再单独保留。）
+    const noplateNos = [];
+    (items || []).forEach(it => {
+        if(!isAuto(it) && it.feeType === '无车牌订单' && it.orderNo) noplateNos.push({pf: it.platform || '', ono: String(it.orderNo).trim()});
+    });
+    if(noplateNos.length) {
+        items = items.filter(it => !(isAuto(it) && noplateNos.some(n => (n.pf === (it.platform || '')) && ordMatch(n.ono, it.orderNo))));
+        md.otherExpenses = md.otherExpenses.filter(e => !(isAuto(e) && noplateNos.some(n => (n.pf === (e.platform || '')) && ordMatch(n.ono, e.orderNo))));
+    }
+
+    // ② 同平台+同订单号+同金额 的手动/遗留行已存在时，自动抓取费用行不再重复生成，
+    //    并清掉旧的同单同额自动行（例：遗留违约金74 行已在做 实收-74/平台收入+74，自动行只是展示重复）。
+    const manRows = [];
+    md.otherExpenses.forEach(e => {
+        if(!isAuto(e) && e.orderNo) manRows.push({pf: e.platform || '', ono: String(e.orderNo).trim(), amt: (Math.abs(parseFloat(e.actualIncome) || parseFloat(e.amount) || 0)).toFixed(2)});
+    });
+    const suppressedGroups = new Set();
+    if(manRows.length) {
+        items = items.filter(it => {
+            if(!isAuto(it) || !it.orderNo) return true;
+            const amt = (Math.abs(parseFloat(it.actualIncome) || parseFloat(it.amount) || 0)).toFixed(2);
+            const hit = manRows.some(m => m.pf === (it.platform || '') && m.amt === amt && ordMatch(m.ono, it.orderNo));
+            if(hit) {
+                suppressedGroups.add((it.platform || '') + '|' + String(it.orderNo).trim() + '|' + it.feeType);
+                return false;
+            }
+            return true;
+        });
+        if(suppressedGroups.size) {
+            md.otherExpenses = md.otherExpenses.filter(e => {
+                if(!isAuto(e)) return true; // 手动行永远保留
+                const gk = (e.platform || '') + '|' + String(e.orderNo || e.plate || '').trim() + '|' + e.feeType;
+                return !suppressedGroups.has(gk);
+            });
+        }
+    }
+
     // 自动抓取条目按 平台+订单号(或车牌)+费用类型 分组，整组替换：
     // 先清掉该组全部旧自动条目（含旧版本留下的重复），再写入整组新条目。
     const autoGroups = new Map();
