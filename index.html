@@ -2558,7 +2558,7 @@ function renderOther(container) {
                                 <td class="text-center"><input class="table-input w-full" value="${exp.amount}" onchange="updateOtherExpense(${i},'amount',this.value)" type="number" step="0.01"></td>
                                 <td class="text-center"><input class="table-input w-full" value="${exp.fee}" onchange="updateOtherExpense(${i},'fee',this.value)" type="number" step="0.01"></td>
                                 <td class="text-center"><input class="table-input w-full" value="${exp.actualIncome}" onchange="updateOtherExpense(${i},'actualIncome',this.value)" type="number" step="0.01"></td>
-                                <td class="text-center"><span class="inline-block px-1.5 py-0.5 rounded text-xs ${exp.feeType ? 'bg-rose-100 text-rose-700' : 'bg-gray-100 text-gray-500'}">${exp.feeType || '其他'}</span>${exp.feeSource ? (exp.feeSource === 'flowRemark' && exp.feeMonth && exp.feeMonth === getCurrentMonthKey() ? '<span class="ml-1 text-xs text-orange-600">计入收入·减实收</span>' : '<span class="ml-1 text-xs text-emerald-600">计入收入</span>') : ''}</td>
+                                <td class="text-center"><span class="inline-block px-1.5 py-0.5 rounded text-xs ${exp.feeType ? 'bg-rose-100 text-rose-700' : 'bg-gray-100 text-gray-500'}">${exp.feeType || '其他'}</span>${exp.feeSource === 'flowRemark' ? (exp.feeMonth && exp.feeMonth === getCurrentMonthKey() ? '<span class="ml-1 text-xs text-orange-600">↓减实收</span>' : '<span class="ml-1 text-xs text-gray-400">仅记录</span>') : (exp.feeSource === 'orderDetail' ? '<span class="ml-1 text-xs text-gray-400">含结算</span>' : (exp.feeType === '无车牌订单' ? '<span class="ml-1 text-xs text-emerald-600">计入收入</span>' : ''))}</td>
                                 <td class="text-center"><input class="table-input w-full" value="${exp.plate || ''}" onchange="updateOtherExpense(${i},'plate',this.value)" placeholder="车牌"></td>
                                 <td class="text-center"><input class="table-input w-full" value="${exp.remark}" onchange="updateOtherExpense(${i},'remark',this.value)"></td>
                                 <td class="text-center"><button onclick="deleteOtherExpense(${i})" class="text-red-500 hover:text-red-700 transition"><i class="fas fa-trash"></i></button></td>
@@ -6839,11 +6839,12 @@ function calcOtherExpensesByPlatform(monthData) {
     };
     if(!monthData.otherExpenses) return map;
     monthData.otherExpenses.forEach(e => {
-        // 自动抓取的费用（带 feeSource：车损/违章/罚金/电费）一律计入平台收入加项（正数=收入）。
-        // 不重复计数说明：
-        //  「流水/备注」来源的当月费用已在 recalcVehiclePlatformSummary 从车辆实收扣减，
-        //   这里加回即把该笔从「车辆实收」归位到「其他费用/平台收入」明细，平台总收入不变；
-        //  「订单明细」来源与跨月费用本身不减实收，这里计入即净增加平台收入。
+        // 挂在车牌下的自动抓取费用（带 feeSource：车损/违章/罚金/电费）是成本，已在 recalcVehiclePlatformSummary 从车辆实收扣减，
+        // 不再计入平台收入（避免重复、也符合「费用不算收入」的口径）。
+        // 以下两类仍计入平台收入：
+        //  ① 无车牌订单转入（feeType='无车牌订单'，无 feeSource，无车牌）——属于独立一行收入，应加入平台收入；
+        //  ② 用户手动填写的其他费用（无 feeSource）——按 actualIncome 正负计入。
+        if(e.feeSource) return;
         const p = String(e.platform || '').trim().toLowerCase();
         const key = Object.keys(aliases).find(k => aliases[k].includes(p));
         if(key) {
