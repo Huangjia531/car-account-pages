@@ -1314,6 +1314,9 @@ function loadData() {
             });
             // 注意：曾在此处自动清理预置模板数据，但会把继承了该月数据的后续月份一起清空，
             // 风险过高，已移除自动清理。如需清理模板数据，请用户在对应月份手动修改。
+            // 清理「自动抓取行与手动行重复」（只删可由对账单再生成的自动行，手动行不动；只改内存）
+            Object.values(appData.months).forEach(md => dedupeAutoDupRows(md));
+            if(appData.shadow && appData.shadow.months) Object.values(appData.shadow.months).forEach(md => dedupeAutoDupRows(md));
         } else {
             appData = getDefaultData();
             appData.customVehicles = [];
@@ -2558,7 +2561,7 @@ function renderOther(container) {
                                 <td class="text-center"><input class="table-input w-full" value="${exp.amount}" onchange="updateOtherExpense(${i},'amount',this.value)" type="number" step="0.01"></td>
                                 <td class="text-center"><input class="table-input w-full" value="${exp.fee}" onchange="updateOtherExpense(${i},'fee',this.value)" type="number" step="0.01"></td>
                                 <td class="text-center"><input class="table-input w-full" value="${exp.actualIncome}" onchange="updateOtherExpense(${i},'actualIncome',this.value)" type="number" step="0.01"></td>
-                                <td class="text-center"><span class="inline-block px-1.5 py-0.5 rounded text-xs ${exp.feeType ? 'bg-rose-100 text-rose-700' : 'bg-gray-100 text-gray-500'}">${exp.feeType || '其他'}</span>${exp.feeSource === 'wukongDeduction' ? (exp.feeMonth && exp.feeMonth === getCurrentMonthKey() ? '<span class="ml-1 text-xs text-orange-600">↓减实收</span>' : '<span class="ml-1 text-xs text-gray-400">非当月不关联</span>') : (exp.feeSource === 'flowRemark' ? (exp.feeMonth && exp.feeMonth === getCurrentMonthKey() ? '<span class="ml-1 text-xs text-orange-600">↓减实收</span>' : '<span class="ml-1 text-xs text-gray-400">仅记录</span>') : (exp.feeSource === 'orderDetail' ? '<span class="ml-1 text-xs text-gray-400">含结算</span>' : (isManualCostRow(exp) ? '<span class="ml-1 text-xs text-orange-600">↓减实收</span>' : (exp.feeType === '无车牌订单' ? '<span class="ml-1 text-xs text-emerald-600">计入收入</span>' : ''))))}</td>
+                                <td class="text-center"><span class="inline-block px-1.5 py-0.5 rounded text-xs ${exp.feeType ? 'bg-rose-100 text-rose-700' : 'bg-gray-100 text-gray-500'}">${exp.feeType || '其他'}</span>${exp.feeSource === 'wukongDeduction' ? (exp.feeMonth && exp.feeMonth === getCurrentMonthKey() ? '<span class="ml-1 text-xs text-orange-600">↓减实收</span>' : '<span class="ml-1 text-xs text-gray-400">减平台收入</span>') : (exp.feeSource === 'flowRemark' ? (exp.feeMonth && exp.feeMonth === getCurrentMonthKey() ? '<span class="ml-1 text-xs text-orange-600">↓减实收</span>' : '<span class="ml-1 text-xs text-gray-400">仅记录</span>') : (exp.feeSource === 'orderDetail' ? '<span class="ml-1 text-xs text-gray-400">含结算</span>' : (isManualCostRow(exp) ? '<span class="ml-1 text-xs text-orange-600">↓减实收</span>' : (exp.feeType === '无车牌订单' ? '<span class="ml-1 text-xs text-emerald-600">计入收入</span>' : ''))))}</td>
                                 <td class="text-center"><input class="table-input w-full" value="${exp.plate || ''}" onchange="updateOtherExpense(${i},'plate',this.value)" placeholder="车牌"></td>
                                 <td class="text-center"><input class="table-input w-full" value="${exp.remark}" onchange="updateOtherExpense(${i},'remark',this.value)"></td>
                                 <td class="text-center"><button onclick="deleteOtherExpense(${i})" class="text-red-500 hover:text-red-700 transition"><i class="fas fa-trash"></i></button></td>
@@ -6156,6 +6159,37 @@ function mergePlatformOtherExpenses(items, targetMd) {
     });
 }
 
+// 数据加载时自动清理「自动抓取行与手动行的重复」（2026-10-22）：
+// 同一条费用不该重复体现。只删自动抓取行（feeSource/自动抓取备注，可由对账单重导入再生），
+// 用户手动行/无车牌订单转入行永远保留。两条规则与 mergePlatformOtherExpenses 一致：
+//  ① 同订单已有「无车牌订单转入」（合计已整体转入，内含各费用列）→ 同单自动费用行删除；
+//  ② 同平台+同订单号(前缀兼容)+同金额 的手动/遗留行已存在 → 同单同额自动行删除。
+// 只改内存，不自动 saveData（与 loadData 的自救约定一致）。
+function dedupeAutoDupRows(md) {
+    if(!md || !Array.isArray(md.otherExpenses)) return;
+    const isAuto = e => e.feeSource || String(e.remark || '').startsWith('自动抓取');
+    const ordMatch = (a, b) => {
+        a = String(a || '').trim(); b = String(b || '').trim();
+        if(!a || !b) return false;
+        return a === b || (a.length >= 12 && b.length >= 12 && (a.startsWith(b) || b.startsWith(a)));
+    };
+    const amtOf = e => (Math.abs(parseFloat(e.actualIncome) || parseFloat(e.amount) || 0)).toFixed(2);
+    const noplate = [];
+    const manRows = [];
+    md.otherExpenses.forEach(e => {
+        if(isAuto(e)) return;
+        if(e.feeType === '无车牌订单' && e.orderNo) noplate.push({pf: e.platform || '', ono: String(e.orderNo).trim()});
+        else if(e.orderNo) manRows.push({pf: e.platform || '', ono: String(e.orderNo).trim(), amt: amtOf(e)});
+    });
+    if(!noplate.length && !manRows.length) return;
+    md.otherExpenses = md.otherExpenses.filter(e => {
+        if(!isAuto(e) || !e.orderNo) return true;
+        if(noplate.some(n => n.pf === (e.platform || '') && ordMatch(n.ono, e.orderNo))) return false;
+        if(manRows.some(m => m.pf === (e.platform || '') && m.amt === amtOf(e) && ordMatch(m.ono, e.orderNo))) return false;
+        return true;
+    });
+}
+
 // ==================== 费用扫描：从平台 Excel 抓取 电费/车损/罚金/违章 ====================
 // 关键词匹配（不依赖固定列名），按订单号关联车辆带出车牌，写入其他费用（正数记录）。
 // 来源区分：订单明细里的费用列 → feeSource='orderDetail'（已含结算，不减实收）；
@@ -7105,7 +7139,17 @@ function calcOtherExpensesByPlatform(monthData) {
         //   金额计入平台收入「其他费用」行，同时已在车辆实收扣减（vehicleFeeDeduction），两者相抵平台收入净额不变，
         //   但车辆实收体现该车承担的成本、其他费用明细体现这笔金额（用户原话："其他费用的金额要加到平台收入，这个扣款的车辆实收减去"）。
         // 无车牌订单转入（feeType='无车牌订单'）同样计入平台收入。
-        if(e.feeSource) return;
+        // 悟空「关联扣款」工单（feeSource='wukongDeduction'，负数减数，2026-10-22 用户口径：
+        // "其他费用两条都要在平台收入减去"）：
+        //   非当月 → 不关联车辆实收，在此按负数计入、直接减平台收入（不重复体现就减一次）；
+        //   当月   → 已从对应车辆悟空实收扣减（vehicleFeeDeduction），此处排除，避免扣两次。
+        if(e.feeSource) {
+            if(e.feeSource === 'wukongDeduction' && (!e.feeMonth || e.feeMonth !== getCurrentMonthKey())) {
+                const pk = Object.keys(aliases).find(k => aliases[k].includes(String(e.platform || '').trim().toLowerCase()));
+                if(pk) map[pk] += parseFloat(e.actualIncome) || 0;
+            }
+            return;
+        }
         const p = String(e.platform || '').trim().toLowerCase();
         const key = Object.keys(aliases).find(k => aliases[k].includes(p));
         if(key) {
