@@ -466,6 +466,8 @@ function adoptCloudData(data, force) {
         const cloudTs = data.savedAt || 0;
         if(cloudTs >= localTs || force) {
             appData = data;
+            // 车贷与还款明细表同步（含利润重算），保证云端数据落地后口径一致
+            syncAllMonthsLoanExpense();
             (appData.customVehicles || []).forEach(cv => {
                 if(!PLATES.find(p => p.plate === cv.plate)) PLATES.push(cv);
             });
@@ -1317,6 +1319,8 @@ function loadData() {
             // 清理「自动抓取行与手动行重复」（只删可由对账单再生成的自动行，手动行不动；只改内存）
             Object.values(appData.months).forEach(md => dedupeAutoDupRows(md));
             if(appData.shadow && appData.shadow.months) Object.values(appData.shadow.months).forEach(md => dedupeAutoDupRows(md));
+            // 车贷与还款明细表同步：各月 summary.loanExpense/利润 统一为还款金额合计（只改内存）
+            syncAllMonthsLoanExpense();
         } else {
             appData = getDefaultData();
             appData.customVehicles = [];
@@ -2203,7 +2207,7 @@ function renderDashboard(container) {
         });
     }
     adjustedPartnerTotal = Math.round(adjustedPartnerTotal * 100) / 100;
-    const displayProfit = Math.round((grandTotal - adjustedPartnerTotal - (s.loanExpense||0) - manualExpense) * 100) / 100;
+    const displayProfit = Math.round((grandTotal - adjustedPartnerTotal - vehicleLoanTotal() - manualExpense) * 100) / 100;
     const profitColor = displayProfit >= 0 ? 'text-green-600' : 'text-red-600';
     const profitBg = displayProfit >= 0 ? 'bg-green-50' : 'bg-red-50';
 
@@ -2355,7 +2359,7 @@ function renderDashboard(container) {
                     </div>
                     <div class="mt-3 p-3 bg-gray-50 rounded-lg text-sm">
                         <span class="text-gray-600">利润计算：</span>
-                        <span class="font-mono">${fmt(grandTotal)} − ${fmt(adjustedPartnerTotal)} − ${fmt(s.loanExpense)} − ${fmt(manualExpense)} = ${fmt(displayProfit)}</span>
+                        <span class="font-mono">${fmt(grandTotal)} − ${fmt(adjustedPartnerTotal)} − ${fmt(vehicleLoanTotal())} − ${fmt(manualExpense)} = ${fmt(displayProfit)}</span>
                     </div>
                 </div>
 
@@ -2467,7 +2471,7 @@ function renderDashboard(container) {
                     <div><label class="block text-xs font-medium text-gray-500 mb-1">哈啰收入</label><input type="number" class="table-input w-full" value="${s.helloIncome}" onchange="updateSummary('helloIncome',this.value)"></div>
                     <div><label class="block text-xs font-medium text-gray-500 mb-1">悟空收入</label><input type="number" class="table-input w-full" value="${s.wukongIncome}" onchange="updateSummary('wukongIncome',this.value)"></div>
                     <div><label class="block text-xs font-medium text-gray-500 mb-1">车损电费扣款</label><input type="number" class="table-input w-full" value="${s.damageDeduction}" onchange="updateSummary('damageDeduction',this.value)"></div>
-                    <div><label class="block text-xs font-medium text-gray-500 mb-1">车贷支出</label><input type="number" class="table-input w-full" value="${s.loanExpense}" onchange="updateSummary('loanExpense',this.value)"></div>
+                    <div><label class="block text-xs font-medium text-gray-500 mb-1">车贷支出（还款明细合计）</label><input type="number" class="table-input w-full bg-gray-50" value="${vehicleLoanTotal()}" readonly title="自动取「车辆还款明细表」还款金额合计，在还款明细页修改后自动同步"></div>
                     <div><label class="block text-xs font-medium text-gray-500 mb-1">合伙人总计</label><input type="number" class="table-input w-full" value="${s.partnerTotal}" onchange="updateSummary('partnerTotal',this.value)"></div>
                     <div><label class="block text-xs font-medium text-gray-500 mb-1">其他支出</label><input type="number" class="table-input w-full" value="${s.manualExpense}" onchange="updateSummary('manualExpense',this.value)" placeholder="未填记0"></div>
                     <div><label class="block text-xs font-medium text-gray-500 mb-1">利润（自动）</label><input type="number" class="table-input w-full bg-gray-50" value="${displayProfit}" readonly></div>
@@ -2510,7 +2514,7 @@ function renderLoans(container) {
                         `).join('')}
                         <tr class="border-t-2 border-gray-200 summary-row">
                             <td colspan="5" class="text-center font-semibold">合计</td>
-                            <td class="text-center font-bold">${fmt(appData.vehicleLoans.reduce((a,b)=>a+(parseFloat(b.monthlyPayment)||0),0))}</td>
+                            <td class="text-center font-bold">${fmt(vehicleLoanTotal())}</td>
                             <td colspan="4"></td>
                         </tr>
                     </tbody>
@@ -6043,8 +6047,43 @@ function addWechatAccountRow() {
     if(currentPage === 'other') renderContent();
 }
 
+// 车贷 = 车辆还款明细表「还款金额」列合计（全局唯一口径，利润计算/月度汇总编辑均取此值，
+// 与明细表合计行恒等同步，手动改表后自动更新）
+function vehicleLoanTotal() {
+    return Math.round((appData.vehicleLoans || []).reduce((a, b) => a + (parseFloat(b.monthlyPayment) || 0), 0) * 100) / 100;
+}
+
+// 还款明细表变化后：同步各月车贷并重算利润（主账/副账；利润=总收入+其他−合伙人−车贷−其他支出）
+function syncLoanExpenseToProfit() {
+    syncAllMonthsLoanExpense();
+    saveData();
+}
+
+// 车贷与还款明细表同步（只改内存，不自动保存）：各月 summary.loanExpense = 还款金额合计，
+// 并按新车贷重算各月存储利润。loadData / adoptCloudData / 手动改还款金额 三条路径都会调用。
+function syncAllMonthsLoanExpense() {
+    const loanTotal = vehicleLoanTotal();
+    const recalc = md => {
+        if(!md || !md.summary) return;
+        md.summary.loanExpense = loanTotal;
+        const sm = md.summary;
+        const totalOther = (sm.ctripOther||0) + (sm.didiOther||0) + (sm.helloOther||0) + (sm.wukongOther||0);
+        const grandTotal = (sm.totalIncome||0) + totalOther;
+        sm.profit = Math.round((grandTotal - (sm.partnerTotal||0) - loanTotal - (sm.manualExpense || 0)) * 100) / 100;
+    };
+    Object.keys(appData.months || {}).forEach(mk => recalc(appData.months[mk]));
+    if(appData.shadow && appData.shadow.months) Object.keys(appData.shadow.months).forEach(mk => recalc(appData.shadow.months[mk]));
+}
+
 function updateLoan(idx, field, value) {
     appData.vehicleLoans[idx][field] = ['model','plate','borrower','startDate'].includes(field) ? value : (parseFloat(value) || 0);
+    if(field === 'monthlyPayment') {
+        // 车贷同步：还款金额变化 → 车贷支出/月利润立即更新
+        syncLoanExpenseToProfit();
+        renderContent();
+    } else {
+        saveData();
+    }
 }
 
 function addLoan() {
@@ -6785,6 +6824,8 @@ function parseLoanSheet(rows) {
 
     if(loans.length > 0) {
         appData.vehicleLoans = loans;
+        // 车贷同步：导入还款明细后，各月车贷支出/月利润按新合计更新
+        syncLoanExpenseToProfit();
     }
 }
 
