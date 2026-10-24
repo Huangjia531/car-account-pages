@@ -160,6 +160,7 @@
                         <button onclick="openAddVehicleModal()" class="text-blue-600 hover:text-blue-800" title="添加车辆"><i class="fas fa-plus-circle"></i></button>
                     </div>
                     <div id="vehicle-nav-list"></div>
+                    <div id="vehicle-merge-hint"></div>
                     <button onclick="openAddVehicleModal()" class="btn w-full mt-2 px-3 py-2 border border-dashed border-blue-300 text-blue-600 rounded-lg text-sm hover:bg-blue-50 transition flex items-center justify-center gap-2">
                         <i class="fas fa-plus"></i> 添加车辆
                     </button>
@@ -1882,6 +1883,152 @@ function toggleSidebarLayer(layer) {
     }
 }
 
+// ==================== 车辆合并：把 fromPlate 的数据整体并入 toPlate（2026-10-25）====================
+// 用于一字之差的手误车牌（如 粤VDD8661 → 粤VDD8681），规范化去重覆盖不到的场景。
+// 各月（主+副账）：订单合并（同单号不重复、空行不搬）、车辆概要相加、目标月不存在时直接改名接管、
+// 其他费用车牌改写、重复键删除；PLATES/customVehicles 信息互补后删除 fromPlate。只改内存。
+function mergeVehicleData(fromPlate, toPlate) {
+    const nFrom = normalizePlate(fromPlate || ''), nTo = normalizePlate(toPlate || '');
+    if(!nFrom || !nTo || nFrom === nTo) return false;
+    let did = false;
+    const SUM_FIELDS = ['totalIncome','didi','hello','ctrip','wukong','didiPf','helloPf','ctripPf','wukongPf',
+        'didiOther','helloOther','ctripOther','wukongOther','pickupFee','rentalIncome','partnerShare'];
+    const mergeOne = md => {
+        if(!md || !md.vehicles) return;
+        const srcKey = Object.keys(md.vehicles).find(k => normalizePlate(k) === nFrom);
+        if(!srcKey) return;
+        const src = md.vehicles[srcKey];
+        const dstKey = Object.keys(md.vehicles).find(k => normalizePlate(k) === nTo);
+        if(!dstKey) {
+            md.vehicles[toPlate] = src;   // 本月目标不存在：直接改名接管，数据原样保留
+            delete md.vehicles[srcKey];
+            did = true;
+            return;
+        }
+        const dst = md.vehicles[dstKey];
+        ['didi', 'hello', 'ctrip', 'wukong'].forEach(pf => {
+            ((src.orders || {})[pf] || []).forEach(o => {
+                if(!o) return;
+                const no = String(o.no || '').trim();
+                const hasAmt = !!(parseFloat(o.actualIncome) || parseFloat(o.rentalFee) || parseFloat(o.pickupFee));
+                if(!no && !hasAmt) return;
+                if(no && (dst.orders[pf] || []).some(x => String(x.no || '').trim() === no)) return;
+                if(!dst.orders[pf]) dst.orders[pf] = [];
+                dst.orders[pf].push(o);
+            });
+        });
+        if(src.summary && dst.summary) {
+            SUM_FIELDS.forEach(f => {
+                const v = parseFloat(src.summary[f]) || 0;
+                if(v) dst.summary[f] = Math.round(((parseFloat(dst.summary[f]) || 0) + v) * 100) / 100;
+            });
+        }
+        delete md.vehicles[srcKey];
+        (md.otherExpenses || []).forEach(e => {
+            if(normalizePlate(e.plate || '') === nFrom) e.plate = dstKey;
+        });
+        did = true;
+    };
+    Object.keys(appData.months || {}).forEach(mk => mergeOne(appData.months[mk]));
+    if(appData.shadow && appData.shadow.months) Object.keys(appData.shadow.months).forEach(mk => mergeOne(appData.shadow.months[mk]));
+    const fromIdx = PLATES.findIndex(p => normalizePlate(p.plate || '') === nFrom);
+    if(fromIdx > -1) {
+        const fv = PLATES[fromIdx];
+        const toInfo = PLATES.find(p => normalizePlate(p.plate || '') === nTo);
+        if(toInfo) {
+            if(!toInfo.model && fv.model) toInfo.model = fv.model;
+            if(!toInfo.owner && fv.owner) toInfo.owner = fv.owner;
+        } else {
+            PLATES.push({plate: toPlate, model: fv.model || '', owner: fv.owner || ''});
+        }
+        PLATES.splice(fromIdx, 1);
+        did = true;
+    }
+    if(Array.isArray(appData.customVehicles)) {
+        const ci = appData.customVehicles.findIndex(c => normalizePlate(c.plate || '') === nFrom);
+        if(ci > -1) {
+            const cv = appData.customVehicles[ci];
+            const tc = appData.customVehicles.find(c => normalizePlate(c.plate || '') === nTo);
+            if(tc) {
+                if(!tc.model && cv.model) tc.model = cv.model;
+                if(!tc.owner && cv.owner) tc.owner = cv.owner;
+            } else {
+                appData.customVehicles.push({plate: toPlate, model: cv.model || '', owner: cv.owner || ''});
+            }
+            appData.customVehicles.splice(ci, 1);
+            did = true;
+        }
+    }
+    return did;
+}
+
+// 某车牌在各月（主+副账）的有效数据条数，用于相似车牌合并时判定「哪边是主」
+function plateDataWeight(plate) {
+    const n = normalizePlate(plate || '');
+    let w = 0;
+    const walk = md => {
+        if(!md || !md.vehicles) return;
+        Object.keys(md.vehicles).forEach(k => {
+            if(normalizePlate(k) !== n) return;
+            const v = md.vehicles[k];
+            ['didi', 'hello', 'ctrip', 'wukong'].forEach(pf => {
+                ((v.orders || {})[pf] || []).forEach(o => {
+                    if(o && (String(o.no || '').trim() || (parseFloat(o.actualIncome) || parseFloat(o.rentalFee) || parseFloat(o.pickupFee)))) w++;
+                });
+            });
+        });
+    };
+    Object.keys(appData.months || {}).forEach(mk => walk(appData.months[mk]));
+    if(appData.shadow && appData.shadow.months) Object.keys(appData.shadow.months).forEach(mk => walk(appData.shadow.months[mk]));
+    return w;
+}
+
+// 相似车牌检测：规范化后编辑距离 ≤ 1（一字之差/多一位），用于发现手误车牌
+function similarPlates(a, b) {
+    a = normalizePlate(a || ''); b = normalizePlate(b || '');
+    if(!a || !b || a === b) return false;
+    if(Math.abs(a.length - b.length) > 1) return false;
+    if(a.length === b.length) {
+        let diff = 0;
+        for(let i = 0; i < a.length; i++) { if(a[i] !== b[i] && ++diff > 1) return false; }
+        return diff === 1;
+    }
+    const s = a.length < b.length ? a : b, l = a.length < b.length ? b : a;
+    let i = 0, j = 0, skipped = false;
+    while(i < s.length && j < l.length) {
+        if(s[i] === l[j]) { i++; j++; }
+        else { if(skipped) return false; skipped = true; j++; }
+    }
+    return true;
+}
+
+// 在 PLATES + 各月车辆键里找疑似重复车牌对（规范化相等已在 selfCheckVehicles 处理，这里只报一字之差）
+function detectSimilarPlatePairs() {
+    const plates = [...new Set(PLATES.map(p => String(p.plate || '').trim()).filter(Boolean))];
+    Object.keys(appData.months || {}).forEach(mk => {
+        Object.keys((appData.months[mk].vehicles) || {}).forEach(k => plates.push(String(k).trim()));
+    });
+    const uniq = [...new Set(plates)];
+    const pairs = [];
+    for(let i = 0; i < uniq.length; i++) {
+        for(let j = i + 1; j < uniq.length; j++) {
+            if(similarPlates(uniq[i], uniq[j])) pairs.push([uniq[i], uniq[j]]);
+        }
+    }
+    return pairs;
+}
+
+// 一键合并（侧栏提示条按钮调用）：from 并入 to，重算保存刷新
+function mergeVehiclesPair(fromPlate, toPlate) {
+    if(!confirm('确定把 ' + fromPlate + ' 的所有数据并入 ' + toPlate + ' 吗？\n订单/费用会合并过去，' + fromPlate + ' 将被删除，此操作不可撤销。')) return;
+    mergeVehicleData(fromPlate, toPlate);
+    selfCheckVehicles();
+    saveData();
+    renderVehicleNav();
+    if(currentPage === 'vehicle' || currentPage === 'dashboard') renderContent();
+    showToast('已合并 ' + fromPlate + ' → ' + toPlate);
+}
+
 // ==================== 车辆自检：归置重复车牌到一辆（2026-10-25）====================
 // ① PLATES / customVehicles 按「规范化车牌」去重（规范化=去空格/横线转大写），保留信息更全的一条；
 // ② 各月 vehicles 中规范化后相同的车牌键（如「粤VDD8681」与「粤VDD8681 」）归置到同一辆：
@@ -2000,6 +2147,19 @@ function renderVehicleNav() {
             <button onclick="event.stopPropagation(); deleteVehicle('${v.plate}')" class="opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-500 ml-1 px-1" title="删除车辆"><i class="fas fa-times text-xs"></i></button>
         </div>
     `).join('');
+    // 疑似重复车牌（一字之差）提示条：一键归置合并
+    const hintEl = document.getElementById('vehicle-merge-hint');
+    if(hintEl) {
+        const inList = x => platesToShow.some(v => normalizePlate(v.plate) === normalizePlate(x));
+        const pairs = detectSimilarPlatePairs().filter(pr => inList(pr[0]) && inList(pr[1]));
+        hintEl.innerHTML = pairs.map(pr => {
+            const from = plateDataWeight(pr[0]) <= plateDataWeight(pr[1]) ? pr[0] : pr[1];
+            const to = from === pr[0] ? pr[1] : pr[0];
+            return '<div class="mx-4 my-1 p-2 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-800 flex items-center justify-between gap-2">'
+                + '<span class="truncate">疑似重复：' + pr[0] + ' ≈ ' + pr[1] + '</span>'
+                + '<button onclick="mergeVehiclesPair(\'' + from + '\',\'' + to + '\')" class="px-2 py-0.5 rounded bg-amber-500 text-white hover:bg-amber-600 whitespace-nowrap">合并到' + to + '</button></div>';
+        }).join('');
+    }
     renderShadowVehicleNav();
 }
 
