@@ -471,6 +471,8 @@ function adoptCloudData(data, force) {
             (appData.customVehicles || []).forEach(cv => {
                 if(!PLATES.find(p => p.plate === cv.plate)) PLATES.push(cv);
             });
+            // 车辆自检：归置重复车牌
+            selfCheckVehicles();
             localStorage.setItem('carAccountData_v5', JSON.stringify(appData));
             setSyncStatus('online');
             lastSyncError = null;
@@ -673,6 +675,7 @@ function handleImportFile(input) {
             appData = data;
             appData.formulaVersion = 5;
             (appData.customVehicles || []).forEach(cv => { if (!PLATES.find(p => p.plate === cv.plate)) PLATES.push(cv); });
+            selfCheckVehicles(); // 车辆自检：归置重复车牌
             saveData();
             renderVehicleNav();
             navigateTo(currentPage === 'vehicle' ? 'vehicle' : 'dashboard');
@@ -1300,6 +1303,8 @@ function loadData() {
             appData.customVehicles.forEach(cv => {
                 if(!PLATES.find(p => p.plate === cv.plate)) PLATES.push(cv);
             });
+            // 车辆自检：归置重复车牌（PLATES/customVehicles/各月数据）
+            selfCheckVehicles();
             // 修复历史数据中错误的“15月”：两个连续15月分别改为11月、12月
             Object.values(appData.months).forEach(md => {
                 ['publicAccount','wechatAccount'].forEach(k => {
@@ -1877,6 +1882,95 @@ function toggleSidebarLayer(layer) {
     }
 }
 
+// ==================== 车辆自检：归置重复车牌到一辆（2026-10-25）====================
+// ① PLATES / customVehicles 按「规范化车牌」去重（规范化=去空格/横线转大写），保留信息更全的一条；
+// ② 各月 vehicles 中规范化后相同的车牌键（如「粤VDD8681」与「粤VDD8681 」）归置到同一辆：
+//    订单合并（同单号不重复）、概要字段在为空时沿用、重复键删除；其他费用行车牌改写为规范车牌。
+// 返回修复处数。只改内存，调用方决定是否保存。在 加载数据/采纳云端/导入车辆表 后自动执行。
+function selfCheckVehicles() {
+    let changed = 0;
+    const norm = p => normalizePlate(p || '');
+    // ① PLATES 去重
+    const kept = [];
+    PLATES.forEach(v => {
+        const k = norm(v.plate);
+        if(!k) { changed++; return; }
+        const prev = kept.find(x => norm(x.plate) === k);
+        if(prev) {
+            if(!prev.model && v.model) prev.model = v.model;
+            if(!prev.owner && v.owner) prev.owner = v.owner;
+            changed++;
+        } else kept.push(v);
+    });
+    if(kept.length !== PLATES.length) {
+        PLATES.length = 0;
+        kept.forEach(v => PLATES.push(v));
+    }
+    // ② customVehicles 去重
+    if(Array.isArray(appData.customVehicles)) {
+        const keptC = [];
+        appData.customVehicles.forEach(cv => {
+            const k = norm(cv.plate);
+            if(!k) { changed++; return; }
+            if(keptC.find(x => norm(x.plate) === k)) { changed++; return; }
+            keptC.push(cv);
+        });
+        if(keptC.length !== appData.customVehicles.length) appData.customVehicles = keptC;
+    }
+    // ③ 各月 vehicles 重复车牌键归置合并
+    Object.keys(appData.months || {}).forEach(mk => {
+        const md = appData.months[mk];
+        if(!md || !md.vehicles) return;
+        const groups = new Map();
+        Object.keys(md.vehicles).forEach(key => {
+            const k = norm(key);
+            if(!k) return;
+            if(!groups.has(k)) groups.set(k, []);
+            groups.get(k).push(key);
+        });
+        groups.forEach((keys, k) => {
+            if(keys.length < 2) return;
+            // 规范键优先取与 PLATES 完全一致的；否则取去空格后最短的（最干净的写法）
+            const canonical = keys.find(key => PLATES.find(p => p.plate === key))
+                || keys.slice().sort((a, b) => (a.replace(/\s/g, '').length - b.replace(/\s/g, '').length) || a.length - b.length)[0];
+            keys.filter(key => key !== canonical).forEach(twin => {
+                const tv = md.vehicles[twin];
+                const cv = md.vehicles[canonical] || createEmptyVehicleData();
+                ['didi', 'hello', 'ctrip', 'wukong'].forEach(pf => {
+                    const arr = (tv && tv.orders && tv.orders[pf]) || [];
+                    arr.forEach(o => {
+                        if(!o) return;
+                        const no = String(o.no || '').trim();
+                        const hasAmt = !!(parseFloat(o.actualIncome) || parseFloat(o.rentalFee) || parseFloat(o.pickupFee));
+                        if(!no && !hasAmt) return; // 空行不搬
+                        if(no && (cv.orders[pf] || []).some(x => String(x.no || '').trim() === no)) return; // 同单号不重复搬
+                        if(!cv.orders[pf]) cv.orders[pf] = [];
+                        cv.orders[pf].push(o);
+                    });
+                });
+                if(cv.summary && tv && tv.summary) {
+                    ['totalIncome', 'partnerShare', 'pickupFee'].forEach(f => {
+                        if(!cv.summary[f] && tv.summary[f]) cv.summary[f] = tv.summary[f];
+                    });
+                }
+                md.vehicles[canonical] = cv;
+                delete md.vehicles[twin];
+                changed++;
+            });
+        });
+        // 其他费用行：车牌不是精确规范键（含空格变体等）→ 改写为规范车牌
+        (md.otherExpenses || []).forEach(e => {
+            const k = norm(e.plate || '');
+            if(!k) return;
+            if(md.vehicles[e.plate]) return; // 已是规范键
+            const pv = PLATES.find(p => norm(p.plate) === k);
+            const canon = (pv && md.vehicles[pv.plate]) ? pv.plate : Object.keys(md.vehicles).find(key => norm(key) === k);
+            if(canon) e.plate = canon;
+        });
+    });
+    return changed;
+}
+
 function renderVehicleNav() {
     const container = document.getElementById('vehicle-nav-list');
     // Include plates from PLATES + any extra plates in current month data
@@ -1891,6 +1985,14 @@ function renderVehicleNav() {
             });
         }
     } catch(e) {}
+    // 显示层自检：规范化车牌去重，杜绝重复车辆出现在侧栏
+    const seenNav = new Set();
+    platesToShow = platesToShow.filter(v => {
+        const k = normalizePlate(v.plate || '');
+        if(!k || seenNav.has(k)) return false;
+        seenNav.add(k);
+        return true;
+    });
     container.innerHTML = platesToShow.map(v => `
         <div class="sidebar-item px-4 py-2 cursor-pointer flex items-center text-sm group" data-plate="${v.plate}" onclick="navigateTo('vehicle', '${v.plate}')">
             <i class="fas fa-car w-5 text-xs"></i>
@@ -1917,6 +2019,13 @@ function renderShadowVehicleNav() {
             });
         }
     } catch(e) {}
+    const seenNavS = new Set();
+    platesToShow = platesToShow.filter(v => {
+        const k = normalizePlate(v.plate || '');
+        if(!k || seenNavS.has(k)) return false;
+        seenNavS.add(k);
+        return true;
+    });
     container.innerHTML = platesToShow.map(v => `
         <div class="sidebar-item px-4 py-2 cursor-pointer flex items-center text-sm group ${currentPage === 'shadowVehicle' && currentPlate === v.plate ? 'active' : ''}" data-plate-shadow="${v.plate}" onclick="navigateTo('shadowVehicle', '${v.plate}')">
             <i class="fas fa-car w-5 text-xs"></i>
@@ -1949,8 +2058,11 @@ function showToast(msg, duration) {
 
 // ==================== 添加 / 删除车辆 ====================
 function isPlateExists(plate) {
-    if(PLATES.find(p => p.plate === plate)) return true;
-    return Object.values(appData.months || {}).some(md => md.vehicles && md.vehicles[plate]);
+    // 规范化比较（去空格/横线转大写），防止「粤VDD8681 」这类写法绕过查重
+    const k = normalizePlate(plate || '');
+    if(!k) return false;
+    if(PLATES.find(p => normalizePlate(p.plate || '') === k)) return true;
+    return Object.values(appData.months || {}).some(md => md.vehicles && Object.keys(md.vehicles).some(key => normalizePlate(key) === k));
 }
 
 function openAddVehicleModal() {
@@ -6648,8 +6760,14 @@ function parseExcelWorkbook(workbook, fileName) {
         if(parsed) {
             // If plate not in PLATES, add it dynamically
             if(!vinfo) {
-                vinfo = {plate: plate, model: parsed.model || '', owner: parsed.owner || ''};
-                PLATES.push(vinfo);
+                // 防重：规范化车牌已存在则不新增（复用已有车辆信息）
+                const existV = PLATES.find(v => normalizePlate(v.plate || '') === normalizePlate(plate || ''));
+                if(existV) {
+                    vinfo = existV;
+                } else {
+                    vinfo = {plate: String(plate || '').replace(/\s/g, ''), model: parsed.model || '', owner: parsed.owner || ''};
+                    PLATES.push(vinfo);
+                }
             } else {
                 // Update vehicle info if Excel has data
                 if(parsed.model) {
@@ -6686,6 +6804,7 @@ function parseExcelWorkbook(workbook, fileName) {
     document.getElementById('monthSelect').value = month;
 
     // Rebuild vehicle nav (in case new plates were detected)
+    selfCheckVehicles(); // 车辆自检：归置重复车牌
     renderVehicleNav();
 
     return {
