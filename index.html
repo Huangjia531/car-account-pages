@@ -474,6 +474,8 @@ function adoptCloudData(data, force) {
             });
             // 车辆自检：归置重复车牌
             selfCheckVehicles();
+            // 应用用户手动修改过的车型覆盖
+            applyVehicleModelOverrides();
             localStorage.setItem('carAccountData_v5', JSON.stringify(appData));
             setSyncStatus('online');
             lastSyncError = null;
@@ -677,6 +679,7 @@ function handleImportFile(input) {
             appData.formulaVersion = 5;
             (appData.customVehicles || []).forEach(cv => { if (!PLATES.find(p => p.plate === cv.plate)) PLATES.push(cv); });
             selfCheckVehicles(); // 车辆自检：归置重复车牌
+            applyVehicleModelOverrides(); // 应用用户手动修改过的车型
             saveData();
             renderVehicleNav();
             navigateTo(currentPage === 'vehicle' ? 'vehicle' : 'dashboard');
@@ -1280,6 +1283,43 @@ let currentPlate = '';
 let currentLayer = 'real';
 let isReadOnlyMode = false;
 
+// ==================== 车型手动输入（2026-11-22）====================
+// 车型可在车辆明细页直接手动修改。PLATES 是硬编码常量，不能直接持久化，
+// 故用 appData.vehicleModels 覆盖映射保存用户改动（含空字符串=清空），加载/云端/导入后回写到 PLATES。
+function applyVehicleModelOverrides() {
+    const map = (appData && appData.vehicleModels) || {};
+    Object.keys(map).forEach(key => {
+        const target = PLATES.find(p => normalizePlate(p.plate || '') === normalizePlate(key || ''));
+        if(target) target.model = String(map[key] || '');
+        // 同步 customVehicles 里的记录，避免刷新后被旧车型覆盖
+        if(appData && Array.isArray(appData.customVehicles)) {
+            const cv = appData.customVehicles.find(c => normalizePlate(c.plate || '') === normalizePlate(key || ''));
+            if(cv) cv.model = String(map[key] || '');
+        }
+    });
+}
+
+function getVehicleModel(plate) {
+    const map = (appData && appData.vehicleModels) || {};
+    const key = Object.keys(map).find(k => normalizePlate(k || '') === normalizePlate(plate || ''));
+    if(key) return String(map[key] || '');
+    const vinfo = PLATES.find(p => normalizePlate(p.plate || '') === normalizePlate(plate || ''));
+    return vinfo ? (vinfo.model || '') : '';
+}
+
+// 车辆明细页车型输入变更：保存覆盖映射、回写 PLATES、持久化并刷新
+function updateVehicleModel(plate, value) {
+    if(!appData.vehicleModels) appData.vehicleModels = {};
+    const normalizedInput = String(value || '').trim();
+    // 以 PLATES 中的标准车牌为键保存，避免手误写法产生多份覆盖
+    const vinfo = PLATES.find(p => normalizePlate(p.plate || '') === normalizePlate(plate || ''));
+    const key = vinfo ? vinfo.plate : plate;
+    appData.vehicleModels[key] = normalizedInput;
+    applyVehicleModelOverrides();
+    saveData();
+    renderContent();
+}
+
 function loadData() {
     try {
         const saved = localStorage.getItem('carAccountData_v5');
@@ -1306,6 +1346,8 @@ function loadData() {
             });
             // 车辆自检：归置重复车牌（PLATES/customVehicles/各月数据）
             selfCheckVehicles();
+            // 应用用户手动修改过的车型覆盖
+            applyVehicleModelOverrides();
             // 修复历史数据中错误的“15月”：两个连续15月分别改为11月、12月
             Object.values(appData.months).forEach(md => {
                 ['publicAccount','wechatAccount'].forEach(k => {
@@ -3287,7 +3329,10 @@ function renderShadowVehicle(container, plate) {
                     <div>
                         <span class="no-screenshot inline-block text-xs bg-white/20 px-2 py-0.5 rounded mb-2"><i class="fas fa-book-copy mr-1"></i>副账套</span>
                         <h2 class="text-2xl font-bold">${plate}</h2>
-                        <p class="text-slate-200 mt-1">${vinfo.model || '未知车型'} ${vinfo.owner ? '(' + vinfo.owner + ')' : ''} · ${month}月</p>
+                        <div class="mt-1 flex items-center gap-2 no-screenshot">
+                            <input id="shadowVehicleModelInput" class="bg-white/10 border border-white/20 rounded px-2 py-0.5 text-sm text-white placeholder-white/50 w-72 max-w-full" value="${escapeHtml(getVehicleModel(plate))}" placeholder="点击输入车型" ${isReadOnlyMode ? 'readonly' : 'onchange="updateVehicleModel(\'' + plate + '\', this.value)"'}>${isReadOnlyMode ? '' : '<span class="text-xs text-slate-300"><i class="fas fa-pen mr-1"></i>可编辑</span>'}
+                        </div>
+                        <p class="text-slate-200 mt-1">${vinfo.owner ? '(' + vinfo.owner + ')' : ''} · ${month}月</p>
                     </div>
                     <div class="text-right">
                         <div class="text-3xl font-bold">${fmt(vd.summary.totalIncome)}</div>
@@ -3409,7 +3454,10 @@ function renderVehicleDetail(container, plate) {
                 <div class="flex items-center justify-between">
                     <div>
                         <h2 class="text-2xl font-bold">${plate}</h2>
-                        <p class="text-blue-200 mt-1">${vinfo.model || '未知车型'} ${vinfo.owner ? '('+vinfo.owner+')' : ''}</p>
+                        <div class="mt-1 flex items-center gap-2 no-screenshot">
+                            <input id="vehicleModelInput" class="bg-white/10 border border-white/20 rounded px-2 py-0.5 text-sm text-white placeholder-white/50 w-72 max-w-full" value="${escapeHtml(getVehicleModel(plate))}" placeholder="点击输入车型" ${isReadOnlyMode ? 'readonly' : 'onchange="updateVehicleModel(\'' + plate + '\', this.value)"'}>${isReadOnlyMode ? '' : '<span class="text-xs text-blue-200"><i class="fas fa-pen mr-1"></i>可编辑</span>'}
+                        </div>
+                        <p class="text-blue-200 mt-1">${vinfo.owner ? '('+vinfo.owner+')' : ''}</p>
                     </div>
                     <div class="text-right">
                         <div class="text-3xl font-bold">${fmt(vd.summary.totalIncome)}</div>
@@ -6932,6 +6980,9 @@ function parseExcelWorkbook(workbook, fileName) {
                 // Update vehicle info if Excel has data
                 if(parsed.model) {
                     vinfo.model = parsed.model;
+                    // 同步车型覆盖映射，避免刷新后被旧值覆盖（用户仍可在明细页手动改）
+                    if(!appData.vehicleModels) appData.vehicleModels = {};
+                    appData.vehicleModels[vinfo.plate] = parsed.model;
                     if(parsed.owner) vinfo.owner = parsed.owner;
                 }
             }
