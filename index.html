@@ -3934,9 +3934,11 @@ function handlePlatformImportMulti(e, platform) {
                 if(platform === 'ctrip') {
                     // 携程：分别读取「订单明细」和「流水」两个分表，跨表关联车牌
                     // 分表识别放宽：订单明细/明细/订单（排除流水）；流水/车牌
-                    const orderSheet = workbook.SheetNames.find(n => (n.includes('订单明细') || n.includes('明细') || n.includes('订单')) && !n.includes('流水'))
+                    const detailSheet = getOrderDetailSheetName(workbook);
+                    const orderSheet = detailSheet
+                        || workbook.SheetNames.find(n => (n.includes('订单明细') || n.includes('明细') || n.includes('订单')) && !n.includes('流水'))
                         || workbook.SheetNames.find(n => n.includes('订单'));
-                    const flowSheet = workbook.SheetNames.find(n => n.includes('流水')) || workbook.SheetNames.find(n => n.includes('车牌'));
+                    const flowSheet = detailSheet ? '' : (workbook.SheetNames.find(n => n.includes('流水')) || workbook.SheetNames.find(n => n.includes('车牌')));
                     let orderRows = [], flowRows = [];
                     if(orderSheet) orderRows = XLSX.utils.sheet_to_json(workbook.Sheets[orderSheet], {header: 1, defval: ''});
                     if(flowSheet) flowRows = XLSX.utils.sheet_to_json(workbook.Sheets[flowSheet], {header: 1, defval: ''});
@@ -3949,7 +3951,7 @@ function handlePlatformImportMulti(e, platform) {
                     // 悟空：订单表（结算金额/佣金B+手续费C/返款金额）+ 工单明细&关联扣款明细 → 其他费用(减数)
                     result = parseWukongStatement(workbook);
                     try {
-                        const wkDed = parseWukongWorkOrders(workbook);
+                        const wkDed = getOrderDetailSheetName(workbook) ? [] : parseWukongWorkOrders(workbook);
                         if(wkDed.length) {
                             result.otherExpenses = (result.otherExpenses || []).concat(wkDed);
                             agg.wukongDed = (agg.wukongDed || 0) + wkDed.length;
@@ -3970,7 +3972,7 @@ function handlePlatformImportMulti(e, platform) {
 
                 // 扫描所有工作表，自动抓取电费/车损/罚金/违章，写入其他费用（带车牌，按订单关联车辆）
                 try {
-                    const feeSheets = workbook.SheetNames.map(n => ({name: n, rows: XLSX.utils.sheet_to_json(workbook.Sheets[n], {header: 1, defval: ''})}));
+                    const feeSheets = getFeeScanSheets(workbook);
                     const feeExp = scanFeeColumns(feeSheets, platform);
                     if(feeExp.length) {
                         result.otherExpenses = (result.otherExpenses || []).concat(feeExp);
@@ -4074,9 +4076,11 @@ function handleShadowImportMulti(e, platform) {
                 }
                 let result;
                 if(platform === 'ctrip') {
-                    const orderSheet = workbook.SheetNames.find(n => (n.includes('订单明细') || n.includes('明细') || n.includes('订单')) && !n.includes('流水'))
+                    const detailSheet = getOrderDetailSheetName(workbook);
+                    const orderSheet = detailSheet
+                        || workbook.SheetNames.find(n => (n.includes('订单明细') || n.includes('明细') || n.includes('订单')) && !n.includes('流水'))
                         || workbook.SheetNames.find(n => n.includes('订单'));
-                    const flowSheet = workbook.SheetNames.find(n => n.includes('流水')) || workbook.SheetNames.find(n => n.includes('车牌'));
+                    const flowSheet = detailSheet ? '' : (workbook.SheetNames.find(n => n.includes('流水')) || workbook.SheetNames.find(n => n.includes('车牌')));
                     let orderRows = [], flowRows = [];
                     if(orderSheet) orderRows = XLSX.utils.sheet_to_json(workbook.Sheets[orderSheet], {header: 1, defval: ''});
                     if(flowSheet) flowRows = XLSX.utils.sheet_to_json(workbook.Sheets[flowSheet], {header: 1, defval: ''});
@@ -4085,7 +4089,7 @@ function handleShadowImportMulti(e, platform) {
                 } else if(platform === 'wukong') {
                     result = parseWukongStatement(workbook);
                     try {
-                        const wkDed = parseWukongWorkOrders(workbook);
+                        const wkDed = getOrderDetailSheetName(workbook) ? [] : parseWukongWorkOrders(workbook);
                         if(wkDed.length) result.otherExpenses = (result.otherExpenses || []).concat(wkDed);
                     } catch(e) { console.error('wukong work order parse error', e); }
                     if(!result.orders.length) result = parseBestPlatformSheet(workbook, platform);
@@ -4121,6 +4125,25 @@ function handleShadowImportMulti(e, platform) {
     readFile(0);
 }
 
+// 2026-11-23 用户口径：账单只要存在「订单明细」工作表，订单和其他费用都只从该表读取，
+// 不再读取「费用项流水」「流水」「汇总」等其他工作表。没有该表的文件（如悟空对账单）沿用原逻辑。
+function getOrderDetailSheetName(workbook) {
+    if(!workbook || !workbook.SheetNames || !workbook.SheetNames.length) return '';
+    return workbook.SheetNames.find(n => String(n).trim() === '订单明细')
+        || workbook.SheetNames.find(n => String(n).includes('订单明细'))
+        || '';
+}
+
+// 其他费用扫描范围：有「订单明细」时只扫该表，否则回退到所有工作表
+function getFeeScanSheets(workbook) {
+    if(!workbook || !workbook.SheetNames) return [];
+    const detailName = getOrderDetailSheetName(workbook);
+    if(detailName) {
+        return [{name: detailName, rows: XLSX.utils.sheet_to_json(workbook.Sheets[detailName], {header: 1, defval: '', raw: false})}];
+    }
+    return workbook.SheetNames.map(n => ({name: n, rows: XLSX.utils.sheet_to_json(workbook.Sheets[n], {header: 1, defval: '', raw: false})}));
+}
+
 // 从 Excel 工作簿中选择最合适的工作表解析平台订单
 function parseBestPlatformSheet(workbook, platform) {
     if(!workbook || !workbook.SheetNames || workbook.SheetNames.length === 0) return {orders: []};
@@ -4128,8 +4151,9 @@ function parseBestPlatformSheet(workbook, platform) {
     // 优先解析看起来是订单明细的工作表；再尝试其他非汇总/非流水的表。
     // 注意：「押金分账/能源费/赔付/调账/其他费用/扣款」等辅助表单独解析为 otherExpenses，
     // 不再简单排除，确保各平台（滴滴/哈啰/携程/悟空）的其他费用都能被抓取并计入数据总览。
-    const ledgerSheets = workbook.SheetNames.filter(n => /押金|分账|能源|赔付|调账|其他费用|扣款/.test(n));
-    const orderSheets = workbook.SheetNames.filter(n => !/(汇总|流水)/.test(n) && !ledgerSheets.includes(n));
+    const onlyDetail = getOrderDetailSheetName(workbook);
+    const ledgerSheets = onlyDetail ? [] : workbook.SheetNames.filter(n => /押金|分账|能源|赔付|调账|其他费用|扣款/.test(n));
+    const orderSheets = onlyDetail ? [onlyDetail] : workbook.SheetNames.filter(n => !/(汇总|流水)/.test(n) && !ledgerSheets.includes(n));
 
     let bestResult = {orders: [], otherExpenses: [], diagnostics: {headers:{}, totals:{rentalFee:0,rawRentalFee:0,platformFee:0,pickupFee:0,actualIncome:0,otherFee:0,stmtIncome:0}, counts:{rows:0,skipped:0,zeroRental:0,zeroPickup:0,zeroPlatform:0,positivePlatform:0,fallbackFee:0}, skippedRows:[], fallbackRows:[], zeroPickupRows:[], zeroRentalRows:[], zeroPlatformRows:[], positivePlatformRows:[], allRows:[], sheetCandidates: [], rawSheetRows: []}, headerRowIdx: -1, colMap: {}};
 
