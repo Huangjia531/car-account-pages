@@ -6557,12 +6557,14 @@ const FEE_KEYWORDS = {
     '车损': ['车损', '维修', '事故', '剐蹭', '划痕', '实扣车损'],
     '违章': ['违章', '实扣违章', '违章押金'],
     '罚金': ['罚金', '违约金', '违约', '罚款'],
-    '电费': ['电费', '能源', '充电']
+    '电费': ['电费', '能源', '充电'],
+    // 附加商品（如「附加商品_儿童座椅」「附加商品_专属司机」）：结算内收入，进其他费用展示，不减实收
+    '附加商品': ['附加商品']
 };
 
 // 在前几行里找表头行（含最多已知表头词的那行）
 function findFeeHeaderRow(rows) {
-    const known = ['订单号', '单号', '订单编号', '订单', '车牌', '车损', '违章', '罚金', '电费', '违约金', '维修', '能源', '扣款', '实扣'];
+    const known = ['订单号', '单号', '订单编号', '订单', '车牌', '车损', '违章', '罚金', '电费', '违约金', '维修', '能源', '扣款', '实扣', '附加商品'];
     let best = -1, bestScore = 0;
     for(let i = 0; i < Math.min(rows.length, 6); i++) {
         const r = rows[i] || [];
@@ -6616,9 +6618,48 @@ function getCurrentMonthKey() {
 // 两种抓取方式：
 // ① 表头即费用列（如「实扣车损」「违章押金」列）→ 取该列数值；
 // ② 费用类型是单元格值（如携程流水「流水类型=罚金」「备注=车损维修」）→ 从行内金额列取值。
+// 独立「附加商品数据」工作表（如平台单独导出该表）：商品名+金额列，按结算内收入抓取。
+// 与订单明细/费用流水的抓取结果统一走 scanFeeColumns 末尾的分组去重。
+function scanAddonProductSheet(sh, platform) {
+    const out = [];
+    const rows = sh.rows || [];
+    if(!rows.length) return out;
+    let hdrIdx = -1;
+    for(let i = 0; i < Math.min(rows.length, 8); i++) {
+        const line = (rows[i] || []).map(c => String(c).trim());
+        if(line.some(h => /金额|实收|收入|费用|价格/.test(h)) && line.some(h => /商品|名称|项目|类型|品类/.test(h))) { hdrIdx = i; break; }
+    }
+    if(hdrIdx < 0) return out;
+    const hdr = (rows[hdrIdx] || []).map(c => String(c).trim());
+    const findCol = re => hdr.findIndex(h => re.test(h) && !/退款|返还|退回/.test(h));
+    const amtCol = findCol(/金额|实收|收入|费用|价格/);
+    if(amtCol < 0) return out;
+    const nameCol = findCol(/商品|名称|项目|类型|品类/);
+    const orderCol = findCol(/订单号|订单编号|订单ID/);
+    const plateCol = findCol(/车牌/);
+    const dateCol = findCol(/日期|时间|结算|账期/);
+    for(let i = hdrIdx + 1; i < rows.length; i++) {
+        const row = rows[i];
+        if(!row || row.every(c => !String(c).trim())) continue;
+        const val = parseFloat(String(row[amtCol] === undefined ? '' : row[amtCol]).replace(/[^\d.\-]/g, ''));
+        if(!(val > 0)) continue;
+        const orderNo = orderCol >= 0 ? String(row[orderCol] || '').trim() : '';
+        let plate = plateCol >= 0 ? normalizePlate(String(row[plateCol] || '')) : '';
+        if(!plate && orderNo) plate = resolvePlateByOrderNo(orderNo);
+        const nm = nameCol >= 0 ? String(row[nameCol] || '').trim() : '';
+        const amount = Math.round(val * 100) / 100;
+        out.push({platform, orderNo, plate, amount, fee: 0, actualIncome: amount, feeType: '附加商品', feeSource: 'orderDetail', feeMonth: dateCol >= 0 ? parseYM(row[dateCol]) : '', remark: `自动抓取-附加商品-${nm || sh.name}`});
+    }
+    return out;
+}
+
 function scanFeeColumns(sheets, platform) {
     const out = [];
     if(!sheets || !sheets.length) return out;
+    // 独立「附加商品数据」工作表：先读出候选行，随后与表头/单元格抓取结果一起去重
+    sheets.forEach(sh => {
+        if(/附加商品/.test(String(sh.name || ''))) out.push(...scanAddonProductSheet(sh, platform));
+    });
     // 行内金额列优先级：结算价金额 > 实扣/扣款金额 > 底价金额 > 金额
     const AMT_PRIORITY = [/^结算价金额$/, /实扣.*金额|扣款金额/, /底价金额/, /^金额$/];
     sheets.forEach(sh => {
@@ -6773,6 +6814,8 @@ function vehicleFeeDeduction(plate, platform) {
     const curKey = getCurrentMonthKey();
     let d = 0;
     md.otherExpenses.forEach(e => {
+        // 附加商品是订单结算内收入（已含在订单合计/实收里），任何来源都只进其他费用展示，不减车辆实收
+        if(e.feeType === '附加商品') return;
         const amt = Math.abs(parseFloat(e.actualIncome) || parseFloat(e.amount) || 0);
         // 悟空「关联扣款」工单：仅当月生效的才关联车辆、从该车悟空实收扣减；非当月只记录
         if(e.feeSource === 'wukongDeduction') {
