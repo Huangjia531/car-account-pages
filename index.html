@@ -998,12 +998,13 @@ const DEFAULT_ORDER_ROWS = 10;
 // 平台费 = 订单金额 × 15%；实收 = 订单金额 × 0.85 − 取送费
 function calcPlatformFee(rentalFee) {
     const rf = parseFloat(rentalFee) || 0;
-    return rf > 0 ? Math.round(rf * 0.15 * 100) / 100 : 0;
+    // 负数单（只有平台服务费扣款）也要按 15% 记录为负数，不能再被置 0
+    return Math.round(rf * 0.15 * 100) / 100;
 }
 function calcActualIncome(rentalFee, pickupFee) {
     const rf = parseFloat(rentalFee) || 0;
     const pf = parseFloat(pickupFee) || 0;
-    return rf > 0 ? Math.round((rf * 0.85 - pf) * 100) / 100 : 0;
+    return Math.round((rf * 0.85 - pf) * 100) / 100;
 }
 // 根据实收金额反推订单金额：实收 = 订单金额 × 0.85 − 取送费  →  订单金额 = (实收 + 取送费) / 0.85
 function inferRentalFee(actualIncome, pickupFee, platformFee) {
@@ -1322,12 +1323,40 @@ function updateVehicleModel(plate, value) {
     renderContent();
 }
 
+// 一次性迁移（2026-11-23 晚）：旧版把「合计」当订单金额/实收的哈啰订单改回正确口径。
+// 旧数据只留了 totalAmount（合计）；账单「订单金额」= 合计 / 0.85，负数单同样成立。
+function migrateLegacyHelloTotalMode() {
+    if(!appData || !appData.months) return 0;
+    const flag = 'patch_20261123_hello_order_amount';
+    if(!appData.appliedPatches) appData.appliedPatches = {};
+    if(appData.appliedPatches[flag]) return 0;
+    let changed = 0;
+    Object.values(appData.months).forEach(md => {
+        Object.values(md.vehicles || {}).forEach(v => {
+            ((v.orders && v.orders.hello) || []).forEach(o => {
+                if(!o || o.incomeMode !== 'total') return;
+                const tv = parseFloat(o.totalAmount) || parseFloat(o.rentalFee) || 0;
+                const rf = Math.round(tv / 0.85 * 100) / 100;
+                const pfee = parseFloat(o.pickupFee) || 0;
+                o.rentalFee = rf;
+                o.platformFee = Math.round(rf * 0.15 * 100) / 100;
+                o.pickupFee = pfee;
+                o.actualIncome = Math.round((rf - o.platformFee - pfee) * 100) / 100;
+                delete o.incomeMode;
+                changed++;
+            });
+        });
+    });
+    appData.appliedPatches[flag] = true;
+    return changed;
+}
+
 // 一次性数据补丁（2026-11-23）：补记 8 月哈啰电费 53.5，只进其他费用/平台收入，不减车辆实收
 function applyOneTimeDataPatches() {
     if(!appData || !appData.months) return;
     const flag = 'patch_20261123_hello_electric';
     if(!appData.appliedPatches) appData.appliedPatches = {};
-    if(appData.appliedPatches[flag]) return;
+    if(!appData.appliedPatches[flag]) {
     const md = appData.months['2026-8'];
     if(md) {
         if(!md.otherExpenses) md.otherExpenses = [];
@@ -1341,6 +1370,8 @@ function applyOneTimeDataPatches() {
         }
     }
     appData.appliedPatches[flag] = true;
+    }
+    migrateLegacyHelloTotalMode();
 }
 
 function loadData() {
@@ -2939,19 +2970,6 @@ function updateShadowOrder(plate, platform, idx, field, value) {
     if(field === 'pickupTime' || field === 'returnTime') order.period = calcPeriod(order.pickupTime, order.returnTime);
     const isNumericField = ['rentalFee','pickupFee','platformFee','actualIncome'].includes(field);
     if(isNumericField) {
-        // 「合计」导入行：编辑金额即改合计，实收同步等于合计，不套 15% 公式
-        if(order.incomeMode === 'total') {
-            if(field === 'rentalFee' || field === 'actualIncome') {
-                order.totalAmount = parseFloat(value) || 0;
-                order.rentalFee = order.totalAmount;
-                order.actualIncome = order.totalAmount;
-                order.platformFee = 0;
-            }
-            recalcShadowVehicleFromOrders(vd);
-            saveData();
-            renderContent();
-            return;
-        }
         if(platform === 'wukong') {
             if(field === 'rentalFee' || field === 'pickupFee' || field === 'platformFee') {
                 const rf = parseFloat(order.rentalFee) || 0, pfee = parseFloat(order.pickupFee) || 0, platf = parseFloat(order.platformFee) || 0;
@@ -4858,6 +4876,14 @@ function parsePlatformOrders(rows, platform, type, wRows) {
             matchCount = Object.keys(tempMap).length;
         } else {
         const claimedCols = new Set();
+        // 「订单金额」列必须精确命中：哈啰10月账单最后一列就是「订单金额」（合计是另一列），
+        // 若被「订单金额（含税）」等前缀列抢占，实收会算错。
+        let exactOrderAmtCol = -1;
+        for(let col = 0; col < row.length; col++) {
+            const rawCell = String(row[col] == null ? '' : row[col]).trim();
+            if(/退款|返还|退回/.test(rawCell)) continue;
+            if(normalizeHeader(rawCell) === '订单金额') { exactOrderAmtCol = col; break; }
+        }
         // 严格关键词优先匹配：金额/费用类核心字段先占坑，避免被宽泛关键词抢占。
         // 例如「平台应收（平台开票金额)（元）」必须优先被 platformFeeReceived 占用，
         // 而不是被「平台服务费」等宽泛词误配到别的列。
@@ -4874,6 +4900,7 @@ function parsePlatformOrders(rows, platform, type, wRows) {
             for(let field in strictKeywords) {
                 if(claimedCols.has(col)) break;
                 if(tempMap[field] !== undefined) continue;
+                if(field === 'rentalFee' && exactOrderAmtCol >= 0 && col !== exactOrderAmtCol) continue;
                 if(strictKeywords[field].some(kw => cellVal.includes(kw))) {
                     tempMap[field] = col;
                     claimedCols.add(col);
@@ -4910,6 +4937,7 @@ function parsePlatformOrders(rows, platform, type, wRows) {
                 if(field === 'pickupFeeParts') continue;
                 if(claimedCols.has(col)) break;
                 if(tempMap[field] !== undefined) continue;
+                if(field === 'rentalFee' && exactOrderAmtCol >= 0 && col !== exactOrderAmtCol) continue;
                 if(headerPatterns[field].some(kw => cellVal.includes(kw))) {
                     tempMap[field] = col;
                     claimedCols.add(col);
@@ -4917,6 +4945,10 @@ function parsePlatformOrders(rows, platform, type, wRows) {
                     break;
                 }
             }
+        }
+        if(exactOrderAmtCol >= 0) {
+            tempMap.rentalFee = exactOrderAmtCol;
+            if(!claimedCols.has(exactOrderAmtCol)) claimedCols.add(exactOrderAmtCol);
         }
         } // end else (非滴滴平台)
         if(matchCount >= 2) {
@@ -5110,14 +5142,16 @@ function parsePlatformOrders(rows, platform, type, wRows) {
             }
         }
 
-        // 表格直接给出「合计」列（哈啰批量合并账单）：实收 = 合计（含负数），平台费不再按 15% 反推，
-        // 取送费也不再二次扣减；用 incomeMode='total' 标记，保证后续三处重算不覆盖导入口径。
+        // 哈啰批量合并账单：保留「合计」原值仅供核对；订单金额严格取表格「订单金额」列，
+        // 平台费=订单金额×15%，实收=订单金额−平台费−取送费（负数单按负数记录并扣减）。
         if(colMap.totalAmount !== undefined && platform !== 'wukong' && platform !== 'didi') {
             order.totalAmount = rawTotal;
-            order.incomeMode = 'total';
-            order.rentalFee = rawTotal;
-            order.platformFee = 0;
-            order.actualIncome = rawTotal;
+            if(colMap.rentalFee === undefined) {
+                const pfRaw = colMap.platformFeeReceived !== undefined ? num(row[colMap.platformFeeReceived]) : (colMap.platformFee !== undefined ? num(row[colMap.platformFee]) : 0);
+                order.rentalFee = Math.round((rawTotal + Math.abs(pfRaw)) * 100) / 100;
+            }
+            order.platformFee = calcPlatformFee(order.rentalFee);
+            order.actualIncome = calcActualIncome(order.rentalFee, order.pickupFee);
         }
 
         // 诊断统计
@@ -5975,7 +6009,7 @@ function fillPlatformOrdersToVehicles(orders, platform, targetMd) {
                 guestName: order.guestName || '',
                 // 悟空对账单导入：记录返款金额与实收口径，保证重算时不被公式覆盖
                 refundFee: order.refundFee !== undefined ? order.refundFee : '',
-                // 哈啰「合计」列导入：实收直接取合计，不被公式覆盖
+                // 哈啰「合计」列仅作核对；订单金额/平台费/实收按表格「订单金额」列与 15% 公式
                 totalAmount: order.totalAmount !== undefined ? order.totalAmount : '',
                 incomeMode: order.incomeMode || ''
             };
@@ -6216,14 +6250,6 @@ function applyFormulaToAllMonths() {
             formulaPlatforms.forEach(pf => {
                 if(!v.orders || !v.orders[pf]) return;
                 v.orders[pf].forEach(o => {
-                    // 「合计」导入行：实收直接取合计（含负数），禁止按 15% 公式重算覆盖
-                    if(o.incomeMode === 'total') {
-                        const tv = parseFloat(o.totalAmount) || parseFloat(o.rentalFee) || 0;
-                        o.rentalFee = tv;
-                        o.platformFee = 0;
-                        o.actualIncome = Math.round(tv * 100) / 100;
-                        return;
-                    }
                     const rf = parseFloat(o.rentalFee) || 0;
                     if(rf > 0 || o.no) {
                         o.platformFee = calcPlatformFee(rf);
