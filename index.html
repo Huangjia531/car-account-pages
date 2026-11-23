@@ -1090,6 +1090,8 @@ function createEmptyMonthData() {
         },
         vehicles: vehicles,
         otherExpenses: [],
+        // 合伙人收益分配表车辆：新月份从上月继承，不按当月数据自动新增，由用户手动增删
+        partnerVehicles: [],
         // 公户/微信结余：新月份默认为空，由 getMonthData 从最近的上一个月继承用户数据；
         // 不再预置任何模板值，避免自动改动用户手动维护的结余数据
         publicAccount: [],
@@ -1776,9 +1778,68 @@ function getShadowMonthData() {
             appData.shadow.months[key] = JSON.parse(JSON.stringify(appData.shadow.months[altKey]));
         } else {
             appData.shadow.months[key] = createEmptyMonthData();
+            // 合伙人收益分配车辆延续上个月；系统不按当月数据自动新增
+            inheritPartnerVehicleList(key, appData.shadow.months[key]);
         }
     }
     return appData.shadow.months[key];
+}
+
+// 合伙人收益分配表的车辆列表：持久化在副账月份数据里，新月份从上月继承。
+// 旧数据没有该字段时，用当月已有合伙人分成的车辆作为初始列表（只做一次兼容，不自动加新车）。
+function ensurePartnerVehicleList(md) {
+    if(!md) return [];
+    if(!Array.isArray(md.partnerVehicles)) {
+        const initial = [];
+        if(md.vehicles) {
+            Object.keys(md.vehicles).forEach(plate => {
+                const ps = parseFloat(md.vehicles[plate] && md.vehicles[plate].summary && md.vehicles[plate].summary.partnerShare) || 0;
+                if(ps > 0) initial.push(plate);
+            });
+        }
+        md.partnerVehicles = [...new Set(initial)];
+    }
+    const seen = new Set();
+    md.partnerVehicles = md.partnerVehicles.filter(p => {
+        const k = normalizePlate(p || '');
+        if(!k || seen.has(k)) return false;
+        seen.add(k);
+        return true;
+    });
+    return md.partnerVehicles;
+}
+
+function prevMonthKeyOf(key) {
+    const parts = String(key).split('-');
+    if(parts.length !== 2) return '';
+    const y = parseInt(parts[0], 10), m = parseInt(parts[1], 10);
+    if(isNaN(y) || isNaN(m)) return '';
+    return m === 1 ? (y - 1) + '-12' : y + '-' + (m - 1);
+}
+
+function inheritPartnerVehicleList(key, md) {
+    if(!md) return;
+    const prevKey = prevMonthKeyOf(key);
+    let prevMd = appData.shadow && appData.shadow.months ? appData.shadow.months[prevKey] : null;
+    if(!prevMd && prevKey) {
+        const parts = prevKey.split('-');
+        const padded = parts[0] + '-' + String(parseInt(parts[1], 10)).padStart(2, '0');
+        prevMd = appData.shadow.months[padded];
+    }
+    md.partnerVehicles = prevMd ? [...ensurePartnerVehicleList(prevMd)] : [];
+    // 继承的车辆即便本月还没数据，也要有空明细，方便用户直接手动改分成
+    md.partnerVehicles.forEach(plate => {
+        if(md.vehicles && !md.vehicles[plate]) md.vehicles[plate] = createEmptyVehicleData();
+    });
+}
+
+function buildPartnerRows(shadowMd) {
+    const list = ensurePartnerVehicleList(shadowMd);
+    return list.map(plate => {
+        const v = shadowMd && shadowMd.vehicles ? shadowMd.vehicles[plate] : null;
+        const amount = parseFloat(v && v.summary && v.summary.partnerShare) || 0;
+        return { plate, amount };
+    });
 }
 
 // 从主账套一键复制：把主账套所有月份数据原样复制到副账套（两套起点完全一致）
@@ -2651,19 +2712,18 @@ function renderDashboard(container) {
 
     // 副账套差额口径：取送费/租金等收入项差额直接扣减合伙人分成，累计到 adj.total（用于总收入卡片）。
     // 主账「合伙人收益分配」表与「各车辆收益汇总-分成」列直接显示副账原始 partnerShare，不显示累计差额。
-    const shadowKey = getShadowMonthKey();
-    const shadowMd = appData.shadow && appData.shadow.months && appData.shadow.months[shadowKey];
+    const shadowMd = getShadowMonthData();
     const shadowAdj = shadowMd && shadowMd.adjustments ? shadowMd.adjustments : { vehicles: {}, total: 0 };
     const totalShadowIncrease = parseFloat(shadowAdj.total) || 0;
     const manualExpense = parseFloat(s.manualExpense) || 0;
-    // 合伙人收益分配表显示「副账原始合伙人分成」合计
-    let adjustedPartnerTotal = 0;
-    if(shadowMd && shadowMd.vehicles) {
-        Object.values(shadowMd.vehicles).forEach(v => {
-            adjustedPartnerTotal += parseFloat(v.summary && v.summary.partnerShare) || 0;
-        });
-    }
-    adjustedPartnerTotal = Math.round(adjustedPartnerTotal * 100) / 100;
+    // 合伙人收益分配表：只显示从上月继承的车辆列表（用户可手动增删），不再按当月数据自动加车
+    const partnerRows = buildPartnerRows(shadowMd);
+    const partnerCandidates = [...new Set([
+        ...PLATES.map(v => v.plate),
+        ...Object.keys(md.vehicles || {}),
+        ...Object.keys((shadowMd && shadowMd.vehicles) || {})
+    ])].filter(p => p && !partnerRows.some(r => normalizePlate(r.plate) === normalizePlate(p)));
+    const adjustedPartnerTotal = Math.round(partnerRows.reduce((sum, r) => sum + (parseFloat(r.amount) || 0), 0) * 100) / 100;
     const displayProfit = Math.round((grandTotal - adjustedPartnerTotal - vehicleLoanTotal() - manualExpense) * 100) / 100;
     const profitColor = displayProfit >= 0 ? 'text-green-600' : 'text-red-600';
     const profitBg = displayProfit >= 0 ? 'bg-green-50' : 'bg-red-50';
@@ -2686,27 +2746,6 @@ function renderDashboard(container) {
             vehicleSummaries.push({plate, model: '', ...vd.summary});
         }
     });
-
-    // 合伙人收益分配表：直接显示副账原始合伙人分成
-    const partnerRows = [];
-    const partnerSeen = new Set();
-    if(shadowMd && shadowMd.vehicles) {
-        PLATES.forEach(v => {
-            if(!shadowMd.vehicles[v.plate]) return;
-            const ps = parseFloat(shadowMd.vehicles[v.plate].summary && shadowMd.vehicles[v.plate].summary.partnerShare) || 0;
-            if(ps > 0) {
-                partnerRows.push({plate: v.plate, amount: ps});
-                partnerSeen.add(v.plate);
-            }
-        });
-        Object.keys(shadowMd.vehicles).forEach(plate => {
-            if(partnerSeen.has(plate)) return;
-            const ps = parseFloat(shadowMd.vehicles[plate].summary && shadowMd.vehicles[plate].summary.partnerShare) || 0;
-            if(ps > 0) {
-                partnerRows.push({plate, amount: ps});
-            }
-        });
-    }
 
     container.innerHTML = `
         <div class="fade-in space-y-6">
@@ -2789,6 +2828,13 @@ function renderDashboard(container) {
                 <div class="bg-white rounded-xl border border-gray-200 p-5 shadow-sm">
                     <div class="flex items-center justify-between mb-4">
                         <h3 class="font-bold text-gray-800"><i class="fas fa-users text-blue-600 mr-2"></i>合伙人收益分配</h3>
+                        <div class="flex items-center gap-2 no-screenshot">
+                            <select id="partnerAddPlate" class="table-input text-xs py-1 px-2 w-28">
+                                <option value="">选择车辆</option>
+                                ${partnerCandidates.map(p => `<option value="${p}">${p}</option>`).join('')}
+                            </select>
+                            <button onclick="addPartnerVehicle()" class="px-2 py-1 text-xs rounded bg-blue-50 text-blue-600 hover:bg-blue-100" title="手动添加车辆到分配表">添加车辆</button>
+                        </div>
                     </div>
                     <div class="overflow-x-auto">
                         <table class="w-full text-sm table-fixed data-table">
@@ -2801,7 +2847,7 @@ function renderDashboard(container) {
                             <tbody>
                                 ${partnerRows.length ? partnerRows.map(r => `
                                     <tr class="border-t border-gray-100 hover:bg-gray-50">
-                                        <td class="px-3 py-2 text-center font-medium text-gray-700">${r.plate}</td>
+                                        <td class="px-3 py-2 text-center font-medium text-gray-700 whitespace-nowrap">${r.plate}<button onclick="removePartnerVehicle('${r.plate}')" class="ml-1 text-gray-300 hover:text-red-500 no-screenshot" title="从分配表移除车辆（不删除车辆数据）">×</button></td>
                                         <td class="px-3 py-2 text-center">
                                             <input class="table-input w-full text-center text-red-600 font-medium" value="${r.amount}" onchange="updateShadowAdjustedPartnerShare('${r.plate}', this.value)" type="number" step="0.01">
                                         </td>
@@ -3115,6 +3161,30 @@ function updateShadowPickupDiff(plate, value) {
 // 主账「合伙人收益分配」表直接显示副账原始 partnerShare；编辑时直接更新副账 partnerShare。
 function updateShadowAdjustedPartnerShare(plate, value) {
     updateShadowVehicleSummary(plate, 'partnerShare', value);
+}
+
+// 合伙人收益分配表车辆：只由用户手动增删，系统不按当月数据自动新增
+function addPartnerVehicle() {
+    const sel = document.getElementById('partnerAddPlate');
+    const plate = sel && sel.value ? String(sel.value).trim() : '';
+    if(!plate) { showToast('请先选择车辆'); return; }
+    const md = getShadowMonthData();
+    const list = ensurePartnerVehicleList(md);
+    if(list.some(p => normalizePlate(p) === normalizePlate(plate))) { showToast('该车辆已在分配表中'); return; }
+    list.push(plate);
+    if(!md.vehicles[plate]) md.vehicles[plate] = createEmptyVehicleData();
+    saveData();
+    renderContent();
+    showToast('已添加车辆 ' + plate);
+}
+
+function removePartnerVehicle(plate) {
+    if(!confirm('确定从合伙人收益分配表移除 ' + plate + ' 吗？\n车辆本身的数据不会删除。')) return;
+    const md = getShadowMonthData();
+    md.partnerVehicles = ensurePartnerVehicleList(md).filter(p => normalizePlate(p) !== normalizePlate(plate));
+    saveData();
+    renderContent();
+    showToast('已移除车辆 ' + plate);
 }
 
 // 兼容旧调用
