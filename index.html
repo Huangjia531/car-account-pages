@@ -1006,6 +1006,21 @@ function calcActualIncome(rentalFee, pickupFee) {
     const pf = parseFloat(pickupFee) || 0;
     return Math.round((rf * 0.85 - pf) * 100) / 100;
 }
+// 悟空对账单导入行（incomeMode='statement'）统一实收口径：
+//   实收 = 订单金额(订单总计) − 平台费(佣金B+手续费C) − 取送费 − 油费 − 关联扣款
+// 旧对账单行 incomeMode='refund' 保留：实收 = 返款金额 − 取送费。
+function calcWukongStatementIncome(order) {
+    const rf = parseFloat(order && order.rentalFee) || 0;
+    if(order && order.incomeMode === 'refund') {
+        return Math.round(((parseFloat(order.refundFee) || 0) - (parseFloat(order.pickupFee) || 0)) * 100) / 100;
+    }
+    const pf = parseFloat(order && order.platformFee) || 0;
+    const pickup = parseFloat(order && order.pickupFee) || 0;
+    const oil = parseFloat(order && order.oilFee) || 0;
+    const ded = parseFloat(order && order.deductionFee) || 0;
+    return Math.round((rf - pf - pickup - oil - ded) * 100) / 100;
+}
+
 // 根据实收金额反推订单金额：实收 = 订单金额 × 0.85 − 取送费  →  订单金额 = (实收 + 取送费) / 0.85
 function inferRentalFee(actualIncome, pickupFee, platformFee) {
     const ai = parseFloat(actualIncome) || 0;
@@ -1759,13 +1774,8 @@ function recalcShadowVehicleFromOrders(v) {
     ['didi','hello','ctrip','wukong'].forEach(pf => {
         if(!v.orders[pf]) v.orders[pf] = Array(DEFAULT_ORDER_ROWS).fill(null).map(createEmptyOrder);
         v.orders[pf].forEach(o => {
-            if(pf === 'wukong' && (parseFloat(o.rentalFee) || 0) > 0) {
-                // 对账单导入的行：实收 = 返款金额 − 取送费（不被订单金额公式覆盖）
-                if(o.incomeMode === 'refund') {
-                    o.actualIncome = Math.round(((parseFloat(o.refundFee) || 0) - (parseFloat(o.pickupFee) || 0)) * 100) / 100;
-                } else {
-                    o.actualIncome = Math.round(((parseFloat(o.rentalFee) || 0) - (parseFloat(o.platformFee) || 0) - (parseFloat(o.pickupFee) || 0)) * 100) / 100;
-                }
+            if(pf === 'wukong' && ((parseFloat(o.rentalFee) || 0) > 0 || o.no)) {
+                o.actualIncome = calcWukongStatementIncome(o);
             }
         });
         const sum = sumOrders(v.orders[pf]);
@@ -2974,7 +2984,7 @@ function renderOther(container) {
                                 <td class="text-center"><input class="table-input w-full" value="${exp.amount}" onchange="updateOtherExpense(${i},'amount',this.value)" type="number" step="0.01"></td>
                                 <td class="text-center"><input class="table-input w-full" value="${exp.fee}" onchange="updateOtherExpense(${i},'fee',this.value)" type="number" step="0.01"></td>
                                 <td class="text-center"><input class="table-input w-full" value="${exp.actualIncome}" onchange="updateOtherExpense(${i},'actualIncome',this.value)" type="number" step="0.01"></td>
-                                <td class="text-center"><span class="inline-block px-1.5 py-0.5 rounded text-xs ${exp.feeType ? 'bg-rose-100 text-rose-700' : 'bg-gray-100 text-gray-500'}">${exp.feeType || '其他'}</span>${exp.feeSource === 'wukongDeduction' ? (exp.feeMonth && exp.feeMonth === getCurrentMonthKey() ? '<span class="ml-1 text-xs text-orange-600">↓减实收</span>' : '<span class="ml-1 text-xs text-gray-400">减平台收入</span>') : (exp.feeSource === 'flowRemark' ? (exp.feeMonth && exp.feeMonth === getCurrentMonthKey() ? '<span class="ml-1 text-xs text-orange-600">↓减实收</span>' : '<span class="ml-1 text-xs text-gray-400">仅记录</span>') : (exp.feeSource === 'orderDetail' ? '<span class="ml-1 text-xs text-gray-400">含结算</span>' : (isManualCostRow(exp) ? '<span class="ml-1 text-xs text-orange-600">↓减实收</span>' : (exp.feeType === '无车牌订单' ? '<span class="ml-1 text-xs text-emerald-600">计入收入</span>' : ''))))}</td>
+                                <td class="text-center"><span class="inline-block px-1.5 py-0.5 rounded text-xs ${exp.feeType ? 'bg-rose-100 text-rose-700' : 'bg-gray-100 text-gray-500'}">${exp.feeType || '其他'}</span>${exp.feeSource === 'wukongWorkOrder' ? '<span class="ml-1 text-xs text-emerald-600">加悟空收入</span>' : (exp.feeSource === 'wukongDeduction' ? (exp.feeMonth && exp.feeMonth === getCurrentMonthKey() ? '<span class="ml-1 text-xs text-orange-600">↓减实收</span>' : '<span class="ml-1 text-xs text-gray-400">减平台收入</span>') : (exp.feeSource === 'flowRemark' ? (exp.feeMonth && exp.feeMonth === getCurrentMonthKey() ? '<span class="ml-1 text-xs text-orange-600">↓减实收</span>' : '<span class="ml-1 text-xs text-gray-400">仅记录</span>') : (exp.feeSource === 'orderDetail' ? '<span class="ml-1 text-xs text-gray-400">含结算</span>' : (isManualCostRow(exp) ? '<span class="ml-1 text-xs text-orange-600">↓减实收</span>' : (exp.feeType === '无车牌订单' ? '<span class="ml-1 text-xs text-emerald-600">计入收入</span>' : '')))))}</td>
                                 <td class="text-center"><input class="table-input w-full" value="${exp.plate || ''}" onchange="updateOtherExpense(${i},'plate',this.value)" placeholder="车牌"></td>
                                 <td class="text-center"><input class="table-input w-full" value="${exp.remark}" onchange="updateOtherExpense(${i},'remark',this.value)"></td>
                                 <td class="text-center"><button onclick="deleteOtherExpense(${i})" class="text-red-500 hover:text-red-700 transition"><i class="fas fa-trash"></i></button></td>
@@ -3513,7 +3523,7 @@ function renderShadowVehicle(container, plate) {
                                     <td class="px-2 py-1.5"><input class="table-input w-full text-center" value="${o.pickupFee}" onchange="updateShadowOrder('${plate}','${pf.key}',${i},'pickupFee',this.value)" type="number" step="0.01"></td>
                                     <td class="px-2 py-1.5"><input class="table-input w-full text-center" value="${o.platformFee}" onchange="updateShadowOrder('${plate}','${pf.key}',${i},'platformFee',this.value)" type="number" step="0.01"></td>
                                     <td class="px-2 py-1.5">${isWukong
-                                        ? `<input class="table-input w-full text-center bg-purple-50 text-purple-700 font-semibold" value="${o.actualIncome}" readonly title="${o.incomeMode === 'refund' ? '悟空对账单导入：实收 = 返款金额 − 取送费' : '悟空实收自动计算：订单金额 − 平台费 − 取送费'}">`
+                                        ? `<input class="table-input w-full text-center bg-purple-50 text-purple-700 font-semibold" value="${o.actualIncome}" readonly title="${o.incomeMode === 'refund' ? '悟空旧对账单：实收 = 返款金额 − 取送费' : '悟空对账单导入：实收 = 订单总计 − 佣金−手续费 − 取送费 − 油费 − 关联扣款'}">`
                                         : `<input class="table-input w-full text-center" value="${o.actualIncome}" onchange="updateShadowOrder('${plate}','${pf.key}',${i},'actualIncome',this.value)" type="number" step="0.01">`}</td>
                                     <td class="px-2 py-1.5 text-center"><input class="table-input w-full text-center" value="${o.period}" onchange="updateShadowOrder('${plate}','${pf.key}',${i},'period',this.value)"></td>
                                     <td class="px-2 py-1.5"><input class="table-input w-full text-center" value="${o.pickupTime}" onchange="updateShadowOrder('${plate}','${pf.key}',${i},'pickupTime',this.value)"></td>
@@ -3639,7 +3649,7 @@ function renderVehicleDetail(container, plate) {
                                     <td class="px-2 py-1.5"><input class="table-input w-full text-center" value="${o.pickupFee}" onchange="updateOrder('${plate}','${pf.key}',${i},'pickupFee',this.value)" type="number" step="0.01"></td>
                                     <td class="px-2 py-1.5"><input class="table-input w-full text-center" value="${o.platformFee}" onchange="updateOrder('${plate}','${pf.key}',${i},'platformFee',this.value)" type="number" step="0.01"></td>
                                     <td class="px-2 py-1.5">${isWukong
-                                        ? `<input class="table-input w-full text-center bg-purple-50 text-purple-700 font-semibold" value="${o.actualIncome}" readonly title="${o.incomeMode === 'refund' ? '悟空对账单导入：实收 = 返款金额 − 取送费' : '悟空实收自动计算：订单金额 − 平台费 − 取送费'}">`
+                                        ? `<input class="table-input w-full text-center bg-purple-50 text-purple-700 font-semibold" value="${o.actualIncome}" readonly title="${o.incomeMode === 'refund' ? '悟空旧对账单：实收 = 返款金额 − 取送费' : '悟空对账单导入：实收 = 订单总计 − 佣金−手续费 − 取送费 − 油费 − 关联扣款'}">`
                                         : `<input class="table-input w-full text-center" value="${o.actualIncome}" onchange="updateOrder('${plate}','${pf.key}',${i},'actualIncome',this.value)" type="number" step="0.01">`}</td>
                                     <td class="px-2 py-1.5"><input class="table-input w-full text-center" value="${o.period}" onchange="updateOrder('${plate}','${pf.key}',${i},'period',this.value)"></td>
                                     <td class="px-2 py-1.5"><input class="table-input w-full text-center" value="${o.pickupTime}" onchange="updateOrder('${plate}','${pf.key}',${i},'pickupTime',this.value)"></td>
@@ -3659,7 +3669,7 @@ function renderVehicleDetail(container, plate) {
                 </div>
                 <div class="text-xs text-gray-500 mt-2 px-1">
                 ${isWukong
-                    ? '悟空：订单金额 / 平台费 / 取送费 手动录入，实收按公式自动计算：实收 = 订单金额 − 平台费 − 取送费（无需手填，改前三项即自动联动）。导入「悟空对账单」的行按对账单口径：订单金额=订单总计，平台费=平台费，取送费=取送费，实收 = 返款金额 − 取送费。'
+                    ? '悟空：订单金额 / 平台费 / 取送费 手动录入，实收按公式自动计算：实收 = 订单金额 − 平台费 − 取送费（无需手填，改前三项即自动联动）。导入「悟空对账单」的行：订单金额=订单总计，平台费=佣金金额+手续费，实收 = 订单总计 − 平台费 − 取送费 − 油费 − 关联扣款；工单明细只计入悟空收入，不扣车辆实收。'
                     : (pf.key === 'didi'
                         ? '滴滴：平台费 = 表格「平台应收/平台开票金额」实际值（0即为0），实收 = 订单金额 − 平台费；取送费作为单独收入加回；押金分账等其他费用统一进「其他费用」接口（按平台归集）。'
                         : (pf.key === 'hello'
@@ -3971,10 +3981,10 @@ function handlePlatformImportMulti(e, platform) {
                         result = parseBestPlatformSheet(workbook, platform);
                     }
                 } else if(platform === 'wukong') {
-                    // 悟空：订单表（结算金额/佣金B+手续费C/返款金额）+ 工单明细&关联扣款明细 → 其他费用(减数)
+                    // 悟空：订单明细（订单总计/佣金B+手续费C/油费/关联扣款）+ 工单明细 → 其他费用(只加悟空收入)
                     result = parseWukongStatement(workbook);
                     try {
-                        const wkDed = getOrderDetailSheetName(workbook) ? [] : parseWukongWorkOrders(workbook);
+                        const wkDed = parseWukongWorkOrders(workbook);
                         if(wkDed.length) {
                             result.otherExpenses = (result.otherExpenses || []).concat(wkDed);
                             agg.wukongDed = (agg.wukongDed || 0) + wkDed.length;
@@ -4112,7 +4122,7 @@ function handleShadowImportMulti(e, platform) {
                 } else if(platform === 'wukong') {
                     result = parseWukongStatement(workbook);
                     try {
-                        const wkDed = getOrderDetailSheetName(workbook) ? [] : parseWukongWorkOrders(workbook);
+                        const wkDed = parseWukongWorkOrders(workbook);
                         if(wkDed.length) result.otherExpenses = (result.otherExpenses || []).concat(wkDed);
                     } catch(e) { console.error('wukong work order parse error', e); }
                     if(!result.orders.length) result = parseBestPlatformSheet(workbook, platform);
@@ -4249,13 +4259,61 @@ function parseBestPlatformSheet(workbook, platform) {
 }
 
 // ==================== 悟空对账单专用解析 ====================
-// 用户确认口径：只抓 Sheet1；
-// 订单金额 = 表格「订单总计」列；平台费 = 「平台费」列；取送费 = 「取送费」列；
-// 实收 = 「返款金额」列 − 取送费。
+// 2026-11-24 用户最终口径（覆盖此前「返款金额−取送费」口径）：
+//   只读「订单明细」工作表；订单金额 = 「订单总计」列；平台费 = 「佣金金额」+「手续费」；
+//   实收 = 订单金额 − 平台费 − 取送费 − 油费 − 关联扣款；
+//   工单明细单独进「其他费用」，只加悟空收入、不扣车辆实收（见 parseWukongWorkOrders）。
+// 兼容旧文件：无「订单总计」时回退「结算金额」；旧订单 incomeMode='refund' 重算分支保留。
+
+// 「关联扣款明细」按关联订单号汇总扣款金额（关联扣款ID = 工单号，经工单明细映射到关联订单号）
+function buildWukongOrderDeductions(workbook) {
+    const map = {};
+    if(!workbook || !workbook.SheetNames || !workbook.Sheets) return map;
+    const dedName = workbook.SheetNames.find(n => /关联扣款/.test(String(n)));
+    if(!dedName) return map;
+    const dRows = XLSX.utils.sheet_to_json(workbook.Sheets[dedName], {header: 1, defval: ''});
+    const dh = dRows.findIndex(r => r && r.some(c => String(c == null ? '' : c).includes('关联扣款ID')));
+    if(dh < 0) return map;
+    const DH = dRows[dh].map(c => String(c == null ? '' : c).trim());
+    const dId = DH.findIndex(h => h.includes('关联扣款ID'));
+    const dAmt = DH.findIndex(h => h.includes('关联扣款金额') || h.includes('扣款金额'));
+    if(dId < 0 || dAmt < 0) return map;
+    // 工单号 → 关联订单号
+    const woToOrder = {};
+    const woName = workbook.SheetNames.find(n => /工单/.test(String(n)) && !/关联扣款/.test(String(n)));
+    if(woName) {
+        const woRows = XLSX.utils.sheet_to_json(workbook.Sheets[woName], {header: 1, defval: ''});
+        const hi = woRows.findIndex(r => r && r.some(c => String(c == null ? '' : c).includes('工单号')));
+        if(hi >= 0) {
+            const H = woRows[hi].map(c => String(c == null ? '' : c).trim());
+            const cWo = H.findIndex(h => h.includes('工单号'));
+            const cNo = H.findIndex(h => h.includes('关联订单号') || h.includes('订单号'));
+            for(let i = hi + 1; i < woRows.length; i++) {
+                const r = woRows[i];
+                if(!r) continue;
+                const wo = String(r[cWo] == null ? '' : r[cWo]).trim();
+                const no = cNo >= 0 ? String(r[cNo] == null ? '' : r[cNo]).trim() : '';
+                if(wo && no) woToOrder[wo] = no;
+            }
+        }
+    }
+    for(let i = dh + 1; i < dRows.length; i++) {
+        const r = dRows[i];
+        if(!r) continue;
+        const id = String(r[dId] == null ? '' : r[dId]).trim();
+        const orderNo = woToOrder[id] || '';
+        if(!orderNo) continue;
+        const amt = Math.abs(num(r[dAmt]));
+        if(!amt) continue;
+        map[orderNo] = Math.round(((map[orderNo] || 0) + amt) * 100) / 100;
+    }
+    return map;
+}
+
 function parseWukongStatement(workbook) {
     const emptyDiag = () => ({
         headers: {}, colIndex: {}, headerRowIdx: -1, sheetName: '',
-        totals: {rentalFee:0, rawRentalFee:0, platformFee:0, rawPlatformFee:0, pickupFee:0, actualIncome:0, otherFee:0, stmtIncome:0, refundFee:0},
+        totals: {rentalFee:0, rawRentalFee:0, platformFee:0, rawPlatformFee:0, pickupFee:0, oilFee:0, deductionFee:0, actualIncome:0, otherFee:0, stmtIncome:0, refundFee:0},
         counts: {rows:0, skipped:0, zeroRental:0, zeroPickup:0, zeroPlatform:0, positivePlatform:0, fallbackFee:0},
         skippedRows: [], fallbackRows: [], zeroPickupRows: [], zeroRentalRows: [], zeroPlatformRows: [], positivePlatformRows: [],
         allRows: [], sheetCandidates: [], rawSheetRows: [], cellProbe: []
@@ -4281,6 +4339,8 @@ function parseWukongStatement(workbook) {
         orderNo: ['订单号', '订单编号', '单号'],
         platformFee: ['平台费'],
         pickupFee: ['取送费', '取送服务费'],
+        oilFee: ['油费'],
+        deductionFee: ['关联扣款'],
         refundFee: ['返款金额', '返款'],
         pickupTime: ['取车时间', '取车日期', '开始时间', '用车时间'],
         returnTime: ['还车时间', '还车日期', '结束时间'],
@@ -4301,8 +4361,8 @@ function parseWukongStatement(workbook) {
         const used = new Set();
         const cells = row.map(c => String(c == null ? '' : c).trim());
 
-        // 订单金额：优先「结算金额」（悟空结算金额A），其次「订单总计/订单总金额/订单总额/订单金额」
-        const amtAliases = ['结算金额', '订单总计', '订单总金额', '订单总额', '订单金额'];
+        // 2026-11-24 新口径：订单金额优先「订单总计」；无该列（旧账单）才回退「结算金额」
+        const amtAliases = ['订单总计', '订单总金额', '订单总额', '订单金额', '结算金额'];
         let amtFound = false;
         for(const alias of amtAliases) {
             for(let col = 0; col < cells.length; col++) {
@@ -4362,6 +4422,8 @@ function parseWukongStatement(workbook) {
         sampleRows: rows.slice(headerRowIdx, Math.min(rows.length, headerRowIdx + 4)).map(r => r.slice(0, 30).map(c => String(c ?? '').replace(/\s+/g, ' ').slice(0, 80)))
     });
 
+    // 关联扣款按「关联订单号」汇总，用于从订单实收中扣减（工单明细进其他费用，只加悟空收入不扣实收）
+    const deductionByOrder = buildWukongOrderDeductions(workbook);
     const orders = [];
     const otherExpenses = [];
     for(let i = headerRowIdx + 1; i < rows.length; i++) {
@@ -4414,15 +4476,21 @@ function parseWukongStatement(workbook) {
             platformFee = num(row[colMap.platformFee]);
         }
         const pickupFee = colMap.pickupFee !== undefined ? num(row[colMap.pickupFee]) : 0;
+        const oilFee = colMap.oilFee !== undefined ? num(row[colMap.oilFee]) : 0;
+        const colDeduction = colMap.deductionFee !== undefined ? num(row[colMap.deductionFee]) : 0;
         const refundFee = colMap.refundFee !== undefined ? num(row[colMap.refundFee]) : 0;
         const pickupTime = colMap.pickupTime !== undefined ? formatDateCell(row[colMap.pickupTime]) : '';
         const returnTime = colMap.returnTime !== undefined ? formatDateCell(row[colMap.returnTime]) : '';
         const orderNo = colMap.orderNo !== undefined ? str(row[colMap.orderNo]) : '';
+        // 关联扣款：订单明细中的「关联扣款」列优先；否则取「关联扣款明细」按关联订单号汇总的金额
+        const orderDeduction = colDeduction || (deductionByOrder[orderNo] || 0);
 
-        // 实收 = 返款金额 − 取送费；无返款列时回退 结算金额 − 平台费(佣金B+手续费C) − 取送费
-        const actualIncome = Math.round((refundFee
-            ? (refundFee - pickupFee)
-            : (rentalFee - platformFee - pickupFee)) * 100) / 100;
+        // 2026-11-24 新口径：实收 = 订单金额(订单总计) − 平台费(佣金B+手续费C) − 取送费 − 油费 − 关联扣款
+        // 旧账单（无订单总计列、仅有结算金额+返款金额）仍保留 refundFee 字段与 incomeMode:'refund' 供重算兼容
+        const isNewStatement = !!colMap.rentalFee && String(rows[headerRowIdx][colMap.rentalFee] || '').includes('订单总计');
+        const actualIncome = isNewStatement
+            ? Math.round((rentalFee - platformFee - pickupFee - oilFee - orderDeduction) * 100) / 100
+            : Math.round((refundFee ? (refundFee - pickupFee) : (rentalFee - platformFee - pickupFee)) * 100) / 100;
 
         const order = {
             plate: normalizePlate(plate),
@@ -4436,12 +4504,14 @@ function parseWukongStatement(workbook) {
             returnTime,
             otherFee: 0,
             refundFee,
-            incomeMode: 'refund'
+            oilFee,
+            deductionFee: orderDeduction,
+            incomeMode: isNewStatement ? 'statement' : 'refund'
         };
 
         if(order.rentalFee === 0) diagnostics.counts.zeroRental++;
         if(order.pickupFee === 0) diagnostics.counts.zeroPickup++;
-        const pfRow = {idx:i, orderNo, plate:order.plate, rentalFee, pickupFee, platformFee, actualIncome};
+        const pfRow = {idx:i, orderNo, plate:order.plate, rentalFee, pickupFee, platformFee, oilFee, deductionFee:orderDeduction, actualIncome};
         if(order.platformFee === 0) {
             diagnostics.counts.zeroPlatform++;
             if(diagnostics.zeroPlatformRows.length < 50) diagnostics.zeroPlatformRows.push(pfRow);
@@ -4453,7 +4523,7 @@ function parseWukongStatement(workbook) {
             diagnostics.allRows.push({
                 idx:i, plate:order.plate, orderNo,
                 rawRentalFee: rentalFee, rawPlatformFee: platformFee, rawPickupFee: pickupFee,
-                rentalFee, platformFee, pickupFee, actualIncome, refundFee,
+                rentalFee, platformFee, pickupFee, oilFee, deductionFee:orderDeduction, actualIncome, refundFee,
                 rawRow: row.slice(0, 30).map(c => String(c ?? '').replace(/\s+/g, ' ').slice(0, 80)).join(' | ')
             });
         }
@@ -4462,6 +4532,8 @@ function parseWukongStatement(workbook) {
         diagnostics.totals.platformFee += platformFee;
         diagnostics.totals.rawPlatformFee += platformFee;
         diagnostics.totals.pickupFee += pickupFee;
+        diagnostics.totals.oilFee += oilFee;
+        diagnostics.totals.deductionFee += orderDeduction;
         diagnostics.totals.actualIncome += actualIncome;
         diagnostics.totals.refundFee += refundFee;
 
@@ -4476,11 +4548,11 @@ function parseWukongStatement(workbook) {
     return {orders, otherExpenses, colMap, headerRowIdx, diagnostics};
 }
 
-// 悟空「工单明细」+「关联扣款明细」→ 其他费用（减数）
-//   工单明细：工单号 / 关联订单号 / 车牌号 / 工单生效时间 / 工单金额 / 工单类型
-//   关联扣款明细：关联扣款ID(=工单号) / 关联扣款金额 —— 与工单为同一笔，按工单号去重不重复抓取
-//   金额一律记为负数（减数）：feeSource='wukongDeduction'，feeMonth=工单生效月份
-//   仅当 feeMonth = 当前查看月份时才关联车辆、从该车悟空实收扣减；非当月只记录不关联。
+// 悟空「工单明细」→ 其他费用（2026-11-24 新口径，覆盖此前「工单+关联扣款=负数扣实收」）
+//   · 工单金额按原值记录（补返/补款为正数，扣款为负数）
+//   · 只加「悟空」平台收入，不扣车辆实收：noVehicleDeduction=true
+//   · 真正的「关联扣款」已在 parseWukongStatement 中按关联订单号从订单实收扣减，不再重复生成费用行
+//   · 按工单号+关联订单号去重
 function parseWukongWorkOrders(workbook) {
     const out = [];
     if(!workbook || !workbook.SheetNames || !workbook.Sheets) return out;
@@ -4497,26 +4569,6 @@ function parseWukongWorkOrders(workbook) {
     const cPlate = ci('车牌号', '车牌'), cTime = ci('工单生效时间', '生效时间');
     const cAmt = ci('工单金额'), cApply = ci('工单申请金额'), cType = ci('工单类型');
 
-    // 关联扣款明细：关联扣款ID → 扣款金额
-    const dedMap = new Map();
-    const dedName = workbook.SheetNames.find(n => /关联扣款/.test(String(n)));
-    if(dedName) {
-        const dRows = XLSX.utils.sheet_to_json(workbook.Sheets[dedName], {header: 1, defval: ''});
-        const dh = dRows.findIndex(r => r && r.some(c => String(c == null ? '' : c).includes('关联扣款ID')));
-        if(dh >= 0) {
-            const DH = dRows[dh].map(c => String(c == null ? '' : c).trim());
-            const dId = DH.findIndex(h => h.includes('关联扣款ID'));
-            const dAmt = DH.findIndex(h => h.includes('关联扣款金额') || h.includes('扣款金额'));
-            for(let i = dh + 1; i < dRows.length; i++) {
-                const r = dRows[i];
-                if(!r) continue;
-                const id = String(r[dId] == null ? '' : r[dId]).trim();
-                if(!id) continue;
-                dedMap.set(id, num(r[dAmt]));
-            }
-        }
-    }
-
     const seen = new Set();
     for(let i = hi + 1; i < woRows.length; i++) {
         const r = woRows[i];
@@ -4527,9 +4579,8 @@ function parseWukongWorkOrders(workbook) {
         if(seen.has(key)) continue;               // 同一工单/订单不重复抓取
         if(!woNo && !orderNo) continue;
         let amt = 0;
-        if(woNo && dedMap.has(woNo)) amt = Math.abs(dedMap.get(woNo));
-        else if(cAmt >= 0) amt = Math.abs(num(r[cAmt]));
-        else if(cApply >= 0) amt = Math.abs(num(r[cApply]));
+        if(cAmt >= 0) amt = num(r[cAmt]);
+        else if(cApply >= 0) amt = num(r[cApply]);
         amt = Math.round(amt * 100) / 100;
         if(Math.abs(amt) < 0.005) continue;
         seen.add(key);
@@ -4537,13 +4588,14 @@ function parseWukongWorkOrders(workbook) {
             platform: 'wukong',
             orderNo,
             plate: normalizePlate(cPlate >= 0 ? str(r[cPlate]) : ''),
-            amount: -amt,
+            amount: amt,
             fee: 0,
-            actualIncome: -amt,
-            feeType: '关联扣款',
-            feeSource: 'wukongDeduction',
+            actualIncome: amt,
+            feeType: '工单明细',
+            feeSource: 'wukongWorkOrder',
+            noVehicleDeduction: true,
             feeMonth: parseYM(formatDateCell(cTime >= 0 ? r[cTime] : '')),
-            remark: '自动抓取-关联扣款-' + (cType >= 0 ? String(r[cType] == null ? '' : r[cType]).trim() : '') + (woNo ? '(工单' + woNo + ')' : '')
+            remark: '自动抓取-工单明细-' + (cType >= 0 ? String(r[cType] == null ? '' : r[cType]).trim() : '') + (woNo ? '(工单' + woNo + ')' : '')
         });
     }
     return out;
@@ -6073,6 +6125,9 @@ function fillPlatformOrdersToVehicles(orders, platform, targetMd) {
                 guestName: order.guestName || '',
                 // 悟空对账单导入：记录返款金额与实收口径，保证重算时不被公式覆盖
                 refundFee: order.refundFee !== undefined ? order.refundFee : '',
+                // 悟空对账单：油费/关联扣款随订单保存，供实收重算（订单总计−平台费−取送费−油费−关联扣款）
+                oilFee: order.oilFee !== undefined ? order.oilFee : '',
+                deductionFee: order.deductionFee !== undefined ? order.deductionFee : '',
                 // 哈啰「合计」列仅作核对；订单金额/平台费/实收按表格「订单金额」列与 15% 公式
                 totalAmount: order.totalAmount !== undefined ? order.totalAmount : '',
                 incomeMode: order.incomeMode || ''
@@ -6132,17 +6187,11 @@ function autoRecalculateAll() {
     const md = getMonthData();
     Object.keys(md.vehicles).forEach(plate => {
         const v = md.vehicles[plate];
-        // 悟空：实收按公式重算（订单金额 − 平台费 − 取送费），保证存量/未触发编辑的数据总览也正确。
-        // 对账单导入的行（incomeMode='refund'）按「返款金额 − 取送费」重算，保留导入口径。
+        // 悟空：统一走 calcWukongStatementIncome（订单总计−平台费−取送费−油费−关联扣款），
+        // 旧对账单行 incomeMode='refund' 自动保留「返款金额−取送费」重算口径。
         (v.orders.wukong || []).forEach(o => {
             const rf = parseFloat(o.rentalFee) || 0;
-            if(rf > 0 || o.no) {
-                if(o.incomeMode === 'refund') {
-                    o.actualIncome = Math.round(((parseFloat(o.refundFee)||0) - (parseFloat(o.pickupFee)||0)) * 100) / 100;
-                } else {
-                    o.actualIncome = Math.round((rf - (parseFloat(o.platformFee)||0) - (parseFloat(o.pickupFee)||0)) * 100) / 100;
-                }
-            }
+            if(rf > 0 || o.no) o.actualIncome = calcWukongStatementIncome(o);
         });
         const ds = sumOrders(v.orders.didi);
         const hs = sumOrders(v.orders.hello);
@@ -6321,18 +6370,11 @@ function applyFormulaToAllMonths() {
                     }
                 });
             });
-            // 悟空：平台费/取送费为人工录入，仅按公式重算实收（订单金额 − 平台费 − 取送费）；
-            // 对账单导入行（incomeMode='refund'）按「返款金额 − 取送费」保留导入口径
+            // 悟空：平台费/取送费/油费/关联扣款按对账单录入，统一重算实收（保留旧 incomeMode='refund' 口径）
             if(v.orders && v.orders.wukong) {
                 v.orders.wukong.forEach(o => {
                     const rf = parseFloat(o.rentalFee) || 0;
-                    if(rf > 0 || o.no) {
-                        if(o.incomeMode === 'refund') {
-                            o.actualIncome = Math.round(((parseFloat(o.refundFee)||0) - (parseFloat(o.pickupFee)||0)) * 100) / 100;
-                        } else {
-                            o.actualIncome = Math.round((rf - (parseFloat(o.platformFee)||0) - (parseFloat(o.pickupFee)||0)) * 100) / 100;
-                        }
-                    }
+                    if(rf > 0 || o.no) o.actualIncome = calcWukongStatementIncome(o);
                 });
             }
             const ds = sumOrders(v.orders.didi), hs = sumOrders(v.orders.hello),
@@ -7127,11 +7169,8 @@ function updateOrder(plate, platform, idx, field, value) {
             return;
         }
         if(platform === 'wukong') {
-            if(field === 'rentalFee' || field === 'pickupFee' || field === 'platformFee') {
-                const rf = parseFloat(order.rentalFee) || 0;
-                const pfee = parseFloat(order.pickupFee) || 0;
-                const platf = parseFloat(order.platformFee) || 0;
-                order.actualIncome = Math.round((rf - platf - pfee) * 100) / 100;
+            if(field === 'rentalFee' || field === 'pickupFee' || field === 'platformFee' || field === 'oilFee' || field === 'deductionFee') {
+                order.actualIncome = calcWukongStatementIncome(order);
             }
         } else if(field === 'rentalFee' || field === 'pickupFee' || field === 'platformFee') {
             const rf = parseFloat(order.rentalFee) || 0;
@@ -7787,6 +7826,12 @@ function calcOtherExpensesByPlatform(monthData) {
         //   当月   → 已从对应车辆悟空实收扣减（vehicleFeeDeduction），此处排除，避免扣两次。
         // 附加商品：实收里已扣减，金额需计入平台收入（其他费用），保证平台总账与账单合计一致
         if(e.feeType === '附加商品') {
+            const pk = Object.keys(aliases).find(k => aliases[k].includes(String(e.platform || '').trim().toLowerCase()));
+            if(pk) map[pk] += parseFloat(e.actualIncome) || 0;
+            return;
+        }
+        // 悟空工单明细（feeSource='wukongWorkOrder'）：按原值计入悟空平台收入，不扣车辆实收
+        if(e.feeSource === 'wukongWorkOrder') {
             const pk = Object.keys(aliases).find(k => aliases[k].includes(String(e.platform || '').trim().toLowerCase()));
             if(pk) map[pk] += parseFloat(e.actualIncome) || 0;
             return;
