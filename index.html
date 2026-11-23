@@ -1409,6 +1409,28 @@ function applyOneTimeDataPatches() {
         }
         appData.appliedPatches[moveFlag] = true;
     }
+    // 2026-11-24 用户确认：合伙人分成 = 租金收益 × 50%，不算取送费/其他费用。
+    // 一次性迁移所有月份、主账+副账全部车辆的存量 partnerShare。
+    const partnerFlag = 'patch_20261124_partner_half_rental';
+    if(!appData.appliedPatches[partnerFlag]) {
+        const fix = md => {
+            if(!md || !md.vehicles) return;
+            Object.keys(md.vehicles).forEach(plate => {
+                const v = md.vehicles[plate];
+                if(v && v.summary) v.summary.partnerShare = calcPartnerShareFromRental(v.summary.rentalIncome);
+            });
+            if(md.summary) {
+                let totalPartner = 0;
+                Object.keys(md.vehicles).forEach(p => {
+                    totalPartner += (md.vehicles[p].summary && md.vehicles[p].summary.partnerShare) || 0;
+                });
+                md.summary.partnerTotal = Math.round(totalPartner * 100) / 100;
+            }
+        };
+        Object.keys(appData.months).forEach(k => fix(appData.months[k]));
+        if(appData.shadow && appData.shadow.months) Object.keys(appData.shadow.months).forEach(k => fix(appData.shadow.months[k]));
+        appData.appliedPatches[partnerFlag] = true;
+    }
     // 一次性清理（2026-11-23）：已取消订单的违约金正负冲正行，旧版只抓了正数，净额其实为 0
     const refundFlag = 'patch_20261123_cancel_refund_fee';
     if(!appData.appliedPatches[refundFlag]) {
@@ -1674,7 +1696,23 @@ function getMonthData() {
     return appData.months[key];
 }
 
-// 新月份创建时，自动继承上月有合伙人收益的车辆，并把合伙人分成设为上月租金收益
+// 合伙人分成统一口径（2026-11-24 用户确认）：分成 = 租金收益 × 50%
+// 与取送费、其他费用、合计收益无关；主账/副账所有车辆同一规则。
+function calcPartnerShareFromRental(rentalIncome) {
+    return Math.round((parseFloat(rentalIncome) || 0) * 50) / 100;
+}
+
+// 同步某月所有车辆的合伙人分成（保留空车 0）
+function syncMonthPartnerShares(md) {
+    if(!md || !md.vehicles) return;
+    Object.keys(md.vehicles).forEach(plate => {
+        const v = md.vehicles[plate];
+        if(!v || !v.summary) return;
+        v.summary.partnerShare = calcPartnerShareFromRental(v.summary.rentalIncome);
+    });
+}
+
+// 新月份创建时，自动继承上月有合伙人收益的车辆，并把合伙人分成设为上月租金收益的一半
 function autoGeneratePartnerShareForNewMonth(key) {
     const parts = String(key).split('-');
     if(parts.length !== 2) return;
@@ -1691,7 +1729,7 @@ function autoGeneratePartnerShareForNewMonth(key) {
         if((prevSummary.partnerShare || 0) > 0) {
             const curVehicle = md.vehicles[plate];
             if(curVehicle) {
-                curVehicle.summary.partnerShare = prevSummary.rentalIncome || 0;
+                curVehicle.summary.partnerShare = calcPartnerShareFromRental(prevSummary.rentalIncome);
                 generated = true;
             }
         }
@@ -3015,7 +3053,6 @@ function updateShadowOrder(plate, platform, idx, field, value) {
     const vd = md.vehicles[plate];
     if(!vd) return;
     const order = vd.orders[platform][idx];
-    const oldPickup = parseFloat(order.pickupFee) || 0;
     order[field] = ['no','period','pickupTime','returnTime'].includes(field) ? value : (parseFloat(value) || 0);
     if(field === 'pickupTime' || field === 'returnTime') order.period = calcPeriod(order.pickupTime, order.returnTime);
     const isNumericField = ['rentalFee','pickupFee','platformFee','actualIncome'].includes(field);
@@ -3035,12 +3072,7 @@ function updateShadowOrder(plate, platform, idx, field, value) {
             }
         }
         recalcShadowVehicleFromOrders(vd);
-        // 订单取送费变化会改变顶部取送费（base），差额只从合伙人分成扣减，租金/合计收益不变
-        const newPickup = parseFloat(order.pickupFee) || 0;
-        const pickupDelta = Math.round((newPickup - oldPickup) * 100) / 100;
-        if(pickupDelta !== 0) {
-            vd.summary.partnerShare = Math.max(0, Math.round(((vd.summary.partnerShare || 0) - pickupDelta) * 100) / 100);
-        }
+        // 2026-11-24 口径：分成只看租金收益的一半，订单取送费变化不扣减分成
         recalcShadowMonthTotals(md);
         syncShadowAdjustmentsFromDiff();
     }
@@ -3052,19 +3084,16 @@ function updateShadowVehicleSummary(plate, field, value) {
     const md = getShadowMonthData();
     const v = md.vehicles[plate];
     if(!v) return;
-    const oldValue = parseFloat(v.summary[field]) || 0;
     const newValue = parseFloat(value) || 0;
-    const delta = Math.round((newValue - oldValue) * 100) / 100;
     v.summary[field] = newValue;
-    // 副账取送费 / 租金 / 合计 变动时，只把差额从合伙人分成扣减，其他两项维持不变
     if(field === 'pickupFee') {
         const base = v.summary.basePickupFee || 0;
         v.summary.extraPickupFee = Math.round(((v.summary.pickupFee || 0) - base) * 100) / 100;
     }
-    if(['pickupFee','rentalIncome','totalIncome'].includes(field)) {
-        if(delta !== 0) {
-            v.summary.partnerShare = Math.max(0, Math.round(((v.summary.partnerShare || 0) - delta) * 100) / 100);
-        }
+    // 2026-11-24 用户确认：合伙人分成 = 租金收益 × 50%，与取送费/其他费用/合计收益无关。
+    // 租金收益变化时自动同步为对半；取送费、合计收益变化不改动分成。
+    if(field === 'rentalIncome') {
+        v.summary.partnerShare = calcPartnerShareFromRental(newValue);
     }
     recalcShadowMonthTotals(md);
     syncShadowAdjustmentsFromDiff();
@@ -3468,8 +3497,8 @@ function renderShadowVehicle(container, plate) {
                         <div><label class="block text-base font-black text-black mb-1">合计收益</label><input type="number" class="table-input w-full text-lg font-bold text-red-600" value="${vd.summary.totalIncome}" onchange="updateShadowVehicleSummary('${plate}','totalIncome',this.value)"></div>
                         <div>
                             <label class="block text-base font-black text-black mb-1">合伙人分成</label>
-                            <input type="number" class="table-input w-full text-lg font-bold text-red-600" value="${vd.summary.partnerShare}" onchange="updateShadowVehicleSummary('${plate}', 'partnerShare', this.value)">
-                            <div class="text-[10px] text-gray-400 mt-1 no-screenshot">累计金额 ${fmt(adj2.increase || 0)} = 主账 ${fmt(rs.partnerShare || 0)} − 副账 ${fmt(vd.summary.partnerShare || 0)}</div>
+                            <input type="number" class="table-input w-full text-lg font-bold text-red-600" value="${vd.summary.partnerShare}" onchange="updateShadowVehicleSummary('${plate}', 'partnerShare', this.value)" title="合伙人分成 = 租金收益 × 50%，改租金收益会自动同步">
+                            <div class="text-[10px] text-gray-400 mt-1 no-screenshot">租金收益 ${fmt(vd.summary.rentalIncome || 0)} × 50% = 分成（不计取送费/其他费用）</div>
                         </div>
                         `;
                     })()}
@@ -3597,7 +3626,7 @@ function renderVehicleDetail(container, plate) {
                     <div><label class="block text-base font-black text-black mb-1">取送费</label><input type="number" class="table-input w-full text-lg font-bold text-red-600" value="${vd.summary.pickupFee}" onchange="updateVehicleSummary('${plate}','pickupFee',this.value)"></div>
                     <div><label class="block text-base font-black text-black mb-1">租金收益</label><input type="number" class="table-input w-full text-lg font-bold text-red-600" value="${vd.summary.rentalIncome}" onchange="updateVehicleSummary('${plate}','rentalIncome',this.value)"></div>
                     <div><label class="block text-base font-black text-black mb-1">合计收益</label><input type="number" class="table-input w-full text-lg font-bold text-red-600" value="${vd.summary.totalIncome}" onchange="updateVehicleSummary('${plate}','totalIncome',this.value)"></div>
-                    <div><label class="block text-base font-black text-black mb-1">合伙人分成</label><input type="number" class="table-input w-full text-lg font-bold text-red-600" value="${vd.summary.partnerShare}" onchange="updateVehicleSummary('${plate}','partnerShare',this.value)"></div>
+                    <div><label class="block text-base font-black text-black mb-1">合伙人分成</label><input type="number" class="table-input w-full text-lg font-bold text-red-600" value="${vd.summary.partnerShare}" onchange="updateVehicleSummary('${plate}','partnerShare',this.value)" title="合伙人分成 = 租金收益 × 50%，改租金收益会自动同步"><div class="text-[10px] text-gray-400 mt-1 no-screenshot">租金收益 × 50%（不计取送费/其他费用）</div></div>
                 </div>
             </div>
     `;
@@ -6031,6 +6060,8 @@ function recalcVehiclePlatformSummary(vd, platform) {
     ) * 100) / 100;
     vd.summary.rentalIncome = (vd.summary.didi || 0) + (vd.summary.hello || 0) + (vd.summary.ctrip || 0) + (vd.summary.wukong || 0);
     vd.summary.totalIncome = vd.summary.rentalIncome + vd.summary.pickupFee;
+    // 合伙人分成 = 租金收益 × 50%（与取送费/其他费用无关）
+    vd.summary.partnerShare = calcPartnerShareFromRental(vd.summary.rentalIncome);
 }
 
 function fillPlatformOrdersToVehicles(orders, platform, targetMd) {
@@ -6223,6 +6254,8 @@ function autoRecalculateAll() {
         v.summary.pickupFee = Math.round((ds.pickupFee + hs.pickupFee + cs.pickupFee + ws.pickupFee) * 100) / 100;
         v.summary.rentalIncome = Math.round((v.summary.didi + v.summary.hello + v.summary.ctrip + v.summary.wukong) * 100) / 100;
         v.summary.totalIncome = Math.round((v.summary.rentalIncome + v.summary.pickupFee) * 100) / 100;
+        // 合伙人分成 = 租金收益 × 50%（与取送费/其他费用无关）
+        v.summary.partnerShare = calcPartnerShareFromRental(v.summary.rentalIncome);
     });
 
     // Recalculate month summary
@@ -7107,6 +7140,10 @@ function vehicleFeeDeduction(plate, platform) {
 function updateVehicleSummary(plate, field, value) {
     const md = getMonthData();
     md.vehicles[plate].summary[field] = parseFloat(value) || 0;
+    // 2026-11-24 口径：租金收益变化 → 合伙人分成自动 = 租金收益 × 50%
+    if(field === 'rentalIncome') {
+        md.vehicles[plate].summary.partnerShare = calcPartnerShareFromRental(md.vehicles[plate].summary.rentalIncome);
+    }
     if(field === 'partnerShare') {
         // 自动汇总合伙人分成并重新计算利润
         let totalPartner = 0;
