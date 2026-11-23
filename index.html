@@ -1371,6 +1371,29 @@ function applyOneTimeDataPatches() {
     }
     appData.appliedPatches[flag] = true;
     }
+    // 2026-11-24：用户确认「哪个月录入就记在哪个月」，53.5 电费从 8 月移到当前录入的 10 月
+    const moveFlag = 'patch_20261124_hello_electric_month';
+    if(!appData.appliedPatches[moveFlag]) {
+        const orderNo = 'RC202608277402608106013854864';
+        const aug = appData.months['2026-8'];
+        if(aug && Array.isArray(aug.otherExpenses)) {
+            aug.otherExpenses = aug.otherExpenses.filter(e =>
+                !(String(e.orderNo || '') === orderNo && e.feeType === '电费' && Math.abs(parseFloat(e.actualIncome) || 0) === 53.5)
+            );
+        }
+        const oct = appData.months['2026-10'];
+        if(oct) {
+            if(!Array.isArray(oct.otherExpenses)) oct.otherExpenses = [];
+            if(!oct.otherExpenses.some(e => String(e.orderNo || '') === orderNo && e.feeType === '电费')) {
+                oct.otherExpenses.push({
+                    platform: 'hello', orderNo, plate: '粤DD85209', amount: 53.5, fee: 0,
+                    actualIncome: 53.5, feeType: '电费', feeMonth: '2026-10',
+                    remark: '手动补记-电费（调账单平台承担费用）', noVehicleDeduction: true
+                });
+            }
+        }
+        appData.appliedPatches[moveFlag] = true;
+    }
     // 一次性清理（2026-11-23）：已取消订单的违约金正负冲正行，旧版只抓了正数，净额其实为 0
     const refundFlag = 'patch_20261123_cancel_refund_fee';
     if(!appData.appliedPatches[refundFlag]) {
