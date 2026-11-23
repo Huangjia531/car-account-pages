@@ -3568,7 +3568,7 @@ function renderVehicleDetail(container, plate) {
                     : (pf.key === 'didi'
                         ? '滴滴：平台费 = 表格「平台应收/平台开票金额」实际值（0即为0），实收 = 订单金额 − 平台费；取送费作为单独收入加回；押金分账等其他费用统一进「其他费用」接口（按平台归集）。'
                         : (pf.key === 'hello'
-                            ? '哈啰：平台费 = 订单金额 × 15%；取送费 = 上门取车服务费 + 送车上门服务费 + 异地还车费 + 夜间取还车服务费（四项求和）；实收 = 订单金额 × 0.85 − 取送费。'
+                            ? '哈啰：平台费 = 订单金额 × 15%；取送费 = 送车上门服务费 + 异地还车费 + 夜间取还车服务费（三项求和，上门取车服务费不计）；实收 = 订单金额 × 0.85 − 取送费。'
                             : '收益公式：平台费 = 订单金额 × 15%，实收 = 订单金额 × 0.85 − 取送费'))}
                 </div>
             </div>
@@ -4165,7 +4165,8 @@ function parseWukongStatement(workbook) {
         refundFee: ['返款金额', '返款'],
         pickupTime: ['取车时间', '取车日期', '开始时间', '用车时间'],
         returnTime: ['还车时间', '还车日期', '结束时间'],
-        period: ['租期', '天数', '时长']
+        period: ['租期', '天数', '时长'],
+        status: ['订单状态', '状态']
     };
     const norm = s => String(s == null ? '' : s)
         .replace(/[（(].*?[）)]/g, '')
@@ -4248,6 +4249,13 @@ function parseWukongStatement(workbook) {
         const row = (wRows && wRows[i]) ? wRows[i] : rows[i];
         if(!row || row.length === 0) continue;
         diagnostics.counts.rows++;
+        // 已取消订单不计入
+        if(isCancelledOrderStatus(colMap.status !== undefined ? row[colMap.status] : '')) {
+            diagnostics.counts.cancelled = (diagnostics.counts.cancelled || 0) + 1;
+            diagnostics.counts.skipped++;
+            if(diagnostics.skippedRows.length < 20) diagnostics.skippedRows.push({idx:i, reason:'已取消订单', preview:row.slice(0,8).map(c=>String(c||'')).join(' | ')});
+            continue;
+        }
 
         const allText = row.map(c => String(c || '')).join('');
         if(allText.includes('合计') || allText.includes('总计') || allText.includes('小计')) {
@@ -4682,6 +4690,12 @@ function exportRawSheetData(fileIdx) {
 }
 
 // ==================== Platform Order Parser ====================
+// 已取消/作废订单不计入（各平台通用）
+function isCancelledOrderStatus(val) {
+    const s = String(val == null ? '' : val).trim();
+    return /取消|撤销|作废|无效|已关单/.test(s);
+}
+
 function parsePlatformOrders(rows, platform, type, wRows) {
     const orders = [];
     const otherExpenses = [];
@@ -4716,8 +4730,8 @@ function parsePlatformOrders(rows, platform, type, wRows) {
         // 平台应收严格匹配；滴滴账单里「平台应收（平台开票金额)(元)」就是平台费，0 就是 0。
         // 刻意移除「佣金/平台分账/平台抽成/技术服务费」等宽泛词——它们极易命中退款/服务费列，导致平台费被误抓或真列被跳过。
         platformFeeReceived: ['平台应收', '平台开票金额', '应收平台费', '平台应收款', '平台应收金额', '平台服务费'],
-        // 哈啰取送费由四项子费用列之和构成
-        pickupFeeParts: ['上门取车服务费', '送车上门服务费', '异地还车费', '夜间取还车服务费'],
+        // 取送费只由三项子费用列之和构成：送车上门 + 异地还车 + 夜间取还车（「上门取车服务费」不计）
+        pickupFeeParts: ['送车上门服务费', '异地还车费', '夜间取还车服务费'],
         // 取送费只认「取送费/取送服务费」，防止误抓「送取车费用退款」
         pickupFee: ['取送费', '取送服务费'],
         pickupTime: ['预订取车时间', '取车时间', '取车日期时间', '真实取车时间', '真实取车日期', '实际取车时间', '实际取车日期', '开始时间', '开始用车时间', '起租时间', '用车时间', '开始日期', '取车日期', '取车'],
@@ -4836,7 +4850,9 @@ function parsePlatformOrders(rows, platform, type, wRows) {
             // 含「退款/返还/退回」的列直接跳过，不允许匹配任何字段。
             // 之前只屏蔽金额字段，导致 pickupTime 的「取车」关键词命中「送取车费用退款」列。
             if(/退款|返还|退回/.test(cellVal)) continue;
-            // 优先识别哈啰取送费的四项子费用（多列求和），避免被通用 pickupFee 关键字抢占
+            // 「上门取车服务费」不计入取送费，且不能误命中「取车时间」等字段 → 直接忽略该列
+            if(/上门取车服务费/.test(cellVal)) { claimedCols.add(col); continue; }
+            // 优先识别取送费三项子费用（多列求和），避免被通用 pickupFee 关键字抢占
             if(headerPatterns.pickupFeeParts.some(kw => cellVal.includes(kw))) {
                 if(!tempMap.pickupFeeParts) tempMap.pickupFeeParts = [];
                 if(!tempMap.pickupFeeParts.includes(col)) tempMap.pickupFeeParts.push(col);
@@ -4895,6 +4911,13 @@ function parsePlatformOrders(rows, platform, type, wRows) {
         diagnostics.counts.rows++;
         if(!row || row.length === 0) continue;
 
+        // 已取消订单不计入（无车牌转入也不做）
+        if(isCancelledOrderStatus(colMap.status !== undefined ? row[colMap.status] : '')) {
+            diagnostics.counts.cancelled = (diagnostics.counts.cancelled || 0) + 1;
+            if(diagnostics.skippedRows.length < 20) diagnostics.skippedRows.push({idx:i, reason:'已取消订单', preview:row.slice(0,8).map(c=>String(c||'')).join(' | ')});
+            continue;
+        }
+
         const plate = colMap.plate !== undefined ? str(row[colMap.plate]) : findPlateInRow(row);
         if(!plate) {
             // 无车牌但有单号、有金额的订单行 → 不丢弃，转入「其他费用」（正数收入，不挂任何车辆）
@@ -4936,7 +4959,7 @@ function parsePlatformOrders(rows, platform, type, wRows) {
         const pickupTime = colMap.pickupTime !== undefined ? formatDateCell(row[colMap.pickupTime]) : '';
         const returnTime = colMap.returnTime !== undefined ? formatDateCell(row[colMap.returnTime]) : '';
         let pickupFee = colMap.pickupFee !== undefined ? num(row[colMap.pickupFee]) : 0;
-        // 哈啰：取送费 = 上门取车服务费 + 送车上门服务费 + 异地还车费 + 夜间取还车服务费（四项求和）
+        // 哈啰：取送费 = 送车上门服务费 + 异地还车费 + 夜间取还车服务费（三项求和，上门取车服务费不计）
         if(colMap.pickupFeeParts && colMap.pickupFeeParts.length > 0) {
             const partsSum = colMap.pickupFeeParts.reduce((s, c) => s + num(row[c]), 0);
             if(partsSum > 0) pickupFee = Math.round(partsSum * 100) / 100;
@@ -5384,7 +5407,8 @@ function parseCtripOrders(orderRows, flowRows) {
         rentalFee: ['订单金额', '订单总额', '订单合计', '订单总金额', '租金', '车辆租金', '日租金合计', '租赁收入', '订单收益', '商品金额', '应付金额', '车辆费用', '总费用'],
         pickupFee: ['取送费', '送车费', '取车费', '还车费', '配送费', '取车服务费', '还车服务费'],
         actualIncome: ['结算金额', '结算价金额', '商家结算金额', '结算总额', '实收金额', '实收', '到账', '结算收入', '商家收入', '实际收入'],
-        period: ['租期', '天数', '时长', '租赁天数']
+        period: ['租期', '天数', '时长', '租赁天数'],
+        status: ['订单状态', '状态']
     };
     const orderHeaderRowIdx = findHeaderRow(orderRows, orderHeaders);
     if(orderHeaderRowIdx < 0) return {orders, plateMapSize: plateByOrderNo.size, ambiguousDates: ambiguousDates.size, unmatchedKeys: 0};
@@ -5399,6 +5423,8 @@ function parseCtripOrders(orderRows, flowRows) {
     for(let i = orderHeaderRowIdx + 1; i < orderRows.length; i++) {
         const row = orderRows[i];
         if(!row || row.length === 0) continue;
+        // 已取消订单不计入
+        if(isCancelledOrderStatus(oColMap.status !== undefined ? row[oColMap.status] : '')) continue;
         const allText = row.map(c => String(c || '')).join('');
         if(allText.includes('合计') || allText.includes('总计') || allText.includes('小计')) continue;
 
@@ -6558,7 +6584,7 @@ const FEE_KEYWORDS = {
     '违章': ['违章', '实扣违章', '违章押金'],
     '罚金': ['罚金', '违约金', '违约', '罚款'],
     '电费': ['电费', '能源', '充电'],
-    // 附加商品（如「附加商品_儿童座椅」「附加商品_专属司机」）：结算内收入，进其他费用展示，不减实收
+    // 附加商品（如「附加商品_儿童座椅」「附加商品_专属司机」）：进其他费用展示、计入平台收入，并从匹配车辆实收扣减
     '附加商品': ['附加商品']
 };
 
@@ -6814,9 +6840,17 @@ function vehicleFeeDeduction(plate, platform) {
     const curKey = getCurrentMonthKey();
     let d = 0;
     md.otherExpenses.forEach(e => {
-        // 附加商品是订单结算内收入（已含在订单合计/实收里），任何来源都只进其他费用展示，不减车辆实收
-        if(e.feeType === '附加商品') return;
         const amt = Math.abs(parseFloat(e.actualIncome) || parseFloat(e.amount) || 0);
+        // 附加商品：读取订单后匹配车辆，从该车实收扣减（金额同时计入平台收入，避免总额重复/漏计）
+        if(e.feeType === '附加商品') {
+            if((e.platform || '') !== platform) return;
+            if(e.plate && normalizePlate(e.plate) === normalizePlate(plate || '')) { d += amt; return; }
+            if(!e.plate && e.orderNo) {
+                const hit = findPlateByOrderNo(e.orderNo, platform, md);
+                if(hit && normalizePlate(hit) === normalizePlate(plate || '')) d += amt;
+            }
+            return;
+        }
         // 悟空「关联扣款」工单：仅当月生效的才关联车辆、从该车悟空实收扣减；非当月只记录
         if(e.feeSource === 'wukongDeduction') {
             if((e.platform || '') !== platform || !e.feeMonth || e.feeMonth !== curKey) return;
@@ -7557,6 +7591,12 @@ function calcOtherExpensesByPlatform(monthData) {
         // "其他费用两条都要在平台收入减去"）：
         //   非当月 → 不关联车辆实收，在此按负数计入、直接减平台收入（不重复体现就减一次）；
         //   当月   → 已从对应车辆悟空实收扣减（vehicleFeeDeduction），此处排除，避免扣两次。
+        // 附加商品：实收里已扣减，金额需计入平台收入（其他费用），保证平台总账与账单合计一致
+        if(e.feeType === '附加商品') {
+            const pk = Object.keys(aliases).find(k => aliases[k].includes(String(e.platform || '').trim().toLowerCase()));
+            if(pk) map[pk] += parseFloat(e.actualIncome) || 0;
+            return;
+        }
         if(e.feeSource) {
             if(e.feeSource === 'wukongDeduction' && (!e.feeMonth || e.feeMonth !== getCurrentMonthKey())) {
                 const pk = Object.keys(aliases).find(k => aliases[k].includes(String(e.platform || '').trim().toLowerCase()));
