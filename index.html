@@ -1371,6 +1371,23 @@ function applyOneTimeDataPatches() {
     }
     appData.appliedPatches[flag] = true;
     }
+    // 一次性清理（2026-11-23）：已取消订单的违约金正负冲正行，旧版只抓了正数，净额其实为 0
+    const refundFlag = 'patch_20261123_cancel_refund_fee';
+    if(!appData.appliedPatches[refundFlag]) {
+        const reversed = [
+            {no:'RC202610187412345647295604386', amt:128},
+            {no:'RC202610217412877299823099304', amt:136},
+            {no:'RC202610257413610115732781586', amt:144}
+        ];
+        Object.values(appData.months).forEach(md => {
+            if(!Array.isArray(md.otherExpenses)) return;
+            md.otherExpenses = md.otherExpenses.filter(e =>
+                !(e.feeSource === 'flowRemark' && e.feeType === '罚金' &&
+                  reversed.some(r => String(e.orderNo || '').includes(r.no) && Math.abs(parseFloat(e.amount) || 0) === r.amt))
+            );
+        });
+        appData.appliedPatches[refundFlag] = true;
+    }
     migrateLegacyHelloTotalMode();
 }
 
@@ -6774,7 +6791,10 @@ function scanAddonProductSheet(sh, platform) {
 }
 
 function scanFeeColumns(sheets, platform) {
-    const out = [];
+    let out = [];
+    // 负数冲正行（同一订单+费用类型+金额的正负成对出现，如取消订单的违约金 128/-128）：
+    // 平台流水里先收后退，净额为 0，不能只抓正数留下虚增收入。
+    const refunds = [];
     if(!sheets || !sheets.length) return out;
     // 独立「附加商品数据」工作表：先读出候选行，随后与表头/单元格抓取结果一起去重
     sheets.forEach(sh => {
@@ -6823,7 +6843,13 @@ function scanFeeColumns(sheets, platform) {
             feeCols.forEach(fc => {
                 const raw = String(row[fc.col] || '').replace(/[^\d.\-]/g, '');
                 const val = parseFloat(raw);
-                if(!(val > 0)) return; // 只抓正数
+                if(!(val > 0)) {
+                    if(val < 0) {
+                        const {plate, orderNo} = grabCommon();
+                        refunds.push({platform, orderNo, plate, feeType: fc.feeType, amount: Math.abs(val)});
+                    }
+                    return;
+                }
                 const {plate, orderNo} = grabCommon();
                 const amount = Math.round(val * 100) / 100; // 正数记录；订单明细来源不减实收
                 out.push({platform, orderNo, plate, amount, fee: 0, actualIncome: amount, feeType: fc.feeType, feeSource: 'orderDetail', feeMonth, remark: `自动抓取-${fc.feeType}-${fc.header}`});
@@ -6849,13 +6875,25 @@ function scanFeeColumns(sheets, platform) {
                     if(!isNaN(v)) { val = v; return true; }
                     return false;
                 });
-                if(!(val > 0)) continue; // 只抓正数
+                if(!(val > 0)) {
+                    if(val < 0) {
+                        const {plate, orderNo} = grabCommon();
+                        refunds.push({platform, orderNo, plate, feeType: hitType, amount: Math.abs(val)});
+                    }
+                    continue;
+                }
                 const {plate, orderNo} = grabCommon();
                 const amount = Math.round(val * 100) / 100; // 正数记录；流水备注来源「当月」才减实收
                 out.push({platform, orderNo, plate, amount, fee: 0, actualIncome: amount, feeType: hitType, feeSource: 'flowRemark', feeMonth, remark: `自动抓取-${hitType}-${hitVal}`});
             }
         }
     });
+    // 正负冲正成对的行（如已取消订单的违约金 128 与 -128）净额为 0，正数额不能留在其他费用里
+    if(refunds.length) {
+        const refundKey = e => `${e.platform}|${e.orderNo || e.plate || ''}|${e.feeType}|${Math.abs(parseFloat(e.amount) || 0).toFixed(2)}`;
+        const refundKeys = new Set(refunds.map(refundKey));
+        out = out.filter(e => !refundKeys.has(refundKey(e)));
+    }
     // 跨表去重（2026-10-21）：哈啰等平台「订单明细」（表头费用列，汇总值）与「费用项流水」
     // （费用类型为单元格值，拆分行）会命中同一笔费用——如违章在明细=1000、流水=300+700 两行。
     // 规则：同一 平台+订单号+费用类型 归为一组：
